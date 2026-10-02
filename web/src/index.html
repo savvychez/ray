@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>ray</title>
+<meta name="description" content="Drive your cmux terminals from your phone, peer-to-peer over tailcat.">
+<meta name="theme-color" content="#1a1a19">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ray">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" class="app">
+  <!-- Sidebar: hosts + terminals -->
+  <aside id="sidebar" class="sidebar" aria-label="Terminals">
+    <div class="sidebar-head">
+      <button id="host-btn" class="host-btn" aria-haspopup="true">
+        <span class="dot" id="host-dot"></span>
+        <span id="host-name">ray</span>
+        <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button id="new-ws-btn" class="icon-btn" title="New workspace" aria-label="New workspace">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div id="host-menu" class="host-menu" hidden></div>
+    <nav id="tree" class="tree"></nav>
+    <div class="sidebar-foot">
+      <span id="conn-label" class="muted">Not connected</span>
+    </div>
+  </aside>
+  <div id="scrim" class="scrim"></div>
+
+  <!-- Main pane -->
+  <main class="main">
+    <header class="topbar">
+      <button id="menu-btn" class="icon-btn" aria-label="Terminals">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h14M3 10h14M3 14h9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <div class="title">
+        <div id="title" class="title-main">ray</div>
+        <div id="subtitle" class="title-sub"></div>
+      </div>
+      <button id="opts-btn" class="icon-btn" aria-label="Options" aria-haspopup="true">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1.6" fill="currentColor"/><circle cx="10" cy="10" r="1.6" fill="currentColor"/><circle cx="16" cy="10" r="1.6" fill="currentColor"/></svg>
+      </button>
+      <div id="opts-menu" class="menu" hidden>
+        <button data-act="focus">Show on Mac</button>
+        <button data-act="wrap">Wrap lines</button>
+        <button data-act="font+">Larger text</button>
+        <button data-act="font-">Smaller text</button>
+        <button data-act="reconnect">Reconnect</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <section id="welcome" class="welcome" hidden>
+      <div class="welcome-card">
+        <img src="icon.svg" alt="" width="64" height="64">
+        <h1>Pair with your Mac</h1>
+        <ol>
+          <li>On the Mac running cmux, run <code>ray serve</code>.</li>
+          <li>Scan the QR code it prints with your phone's camera.</li>
+          <li>Add this page to your home screen for the app experience.</li>
+        </ol>
+        <form id="paste-form" class="paste">
+          <input id="paste-input" type="url" placeholder="…or paste the pairing link" autocomplete="off" autocapitalize="off" spellcheck="false">
+          <button type="submit">Pair</button>
+        </form>
+        <p class="muted small">Traffic is end-to-end encrypted with WireGuard via <a href="https://github.com/tailscale/tailcat" target="_blank" rel="noopener">tailcat</a>. No account, no cloud.</p>
+      </div>
+    </section>
+
+    <section id="term-wrap" class="term-wrap">
+      <pre id="term" class="term" tabindex="0" aria-live="off"></pre>
+      <button id="jump-btn" class="jump" hidden aria-label="Jump to bottom">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v11M5 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div id="empty" class="empty" hidden></div>
+    </section>
+
+    <footer id="composer" class="composer">
+      <div class="keys" id="keys">
+        <button data-key="escape">esc</button>
+        <button data-key="tab">tab</button>
+        <button data-mod="ctrl" id="ctrl-key">ctrl</button>
+        <button data-raw="\u0003">^C</button>
+        <button data-key="up" aria-label="Up">↑</button>
+        <button data-key="down" aria-label="Down">↓</button>
+        <button data-key="left" aria-label="Left">←</button>
+        <button data-key="right" aria-label="Right">→</button>
+        <button data-key="backspace" aria-label="Backspace">⌫</button>
+        <button data-key="enter" aria-label="Enter">⏎</button>
+        <button data-raw="\u0004">^D</button>
+        <button data-raw="\u000c">^L</button>
+        <button data-raw="\u0012">^R</button>
+        <button data-raw="\u001a">^Z</button>
+      </div>
+      <form id="input-form" class="input-row">
+        <button type="button" id="mode-btn" class="mode" title="Line mode: type a line, then send. Live mode: every key goes straight to the terminal." aria-pressed="false">line</button>
+        <textarea id="input" rows="1" placeholder="Message terminal…" enterkeyhint="send" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        <button type="submit" id="send-btn" class="send" aria-label="Send">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4M5 9l5-5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </form>
+    </footer>
+  </main>
+</div>
+
+<div id="loader" class="loader">
+  <img src="icon.svg" alt="" width="56" height="56">
+  <div id="loader-text">Loading…</div>
+  <progress id="loader-bar" max="1"></progress>
+</div>
+
+<script src="wasm_exec.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
