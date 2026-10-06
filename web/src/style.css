@@ -101,6 +101,7 @@ a { color: var(--accent); }
 .row .glyph { width: 18px; height: 18px; flex: none; color: var(--muted); }
 .row.active .glyph { color: var(--accent); }
 .row .badge { font-size: 11px; color: var(--muted); flex: none; }
+.row .badge.warn { color: var(--warn); font-weight: 700; }
 .row .front { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
 .sub { padding-left: 18px; }
 .sub .row { min-height: 36px; padding: 7px 10px; font-size: 14px; }

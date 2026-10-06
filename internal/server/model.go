@@ -15,6 +15,8 @@ type Workspace struct {
 	Title    string    `json:"title"`
 	Selected bool      `json:"selected"`
 	Surfaces []Surface `json:"surfaces"`
+	// Error is set when cmux couldn't list this workspace's surfaces.
+	Error string `json:"error,omitempty"`
 }
 
 // Surface is a tab/panel inside a workspace.
@@ -69,7 +71,9 @@ func (b *CmuxBackend) Tree(ctx context.Context) ([]Workspace, error) {
 			Surfaces []Surface `json:"surfaces"`
 		}
 		if err := b.call(ctx, "surface.list", map[string]any{"workspace_id": ws.ID}, &sl); err != nil {
-			// A workspace that vanished mid-listing is not fatal.
+			// Not fatal: the phone can still open the workspace and let
+			// cmux pick its focused terminal, and shows this reason.
+			ws.Error = err.Error()
 			continue
 		}
 		ws.Surfaces = sl.Surfaces
