@@ -34,8 +34,89 @@ type Caller interface {
 
 // RPCError is an error returned by cmux itself (ok:false).
 type RPCError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string          `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+// retryAfter reports how long cmux asked us to back off, for rate_limited
+// replies.
+func (e *RPCError) retryAfter() (time.Duration, bool) {
+	if e.Code != "rate_limited" {
+		return 0, false
+	}
+	var d struct {
+		RetryAfterMS int `json:"retry_after_ms"`
+	}
+	json.Unmarshal(e.Data, &d)
+	return time.Duration(max(d.RetryAfterMS, 20)) * time.Millisecond, true
+}
+
+// pollingMethods are the read methods cmux meters per connection with a
+// token bucket (burst 9, one token per 100ms); see cmux's
+// ControlClientRateLimiter. Everything else (input, focus, …) is unmetered.
+var pollingMethods = map[string]bool{
+	"system.top": true, "system.memory": true, "system.tree": true, "system.identify": true,
+	"window.list": true, "window.current": true, "window.displays": true,
+	"workspace.list": true, "workspace.current": true,
+	"surface.list": true, "surface.current": true, "surface.read_text": true, "surface.read_selection": true,
+	"pane.list": true, "pane.surfaces": true,
+}
+
+// bucket mirrors cmux's per-connection limiter on our side, so polls wait
+// their turn instead of bouncing off rate_limited errors. It keeps one
+// token in reserve.
+type bucket struct {
+	tokens float64
+	last   time.Time
+}
+
+const (
+	bucketBurst = 8
+	bucketRate  = 10.0 // tokens per second
+)
+
+// wait blocks until a polling call may go out.
+func (b *bucket) wait(ctx context.Context) error {
+	for {
+		now := time.Now()
+		if b.last.IsZero() {
+			b.tokens, b.last = bucketBurst, now
+		}
+		b.tokens = min(bucketBurst, b.tokens+now.Sub(b.last).Seconds()*bucketRate)
+		b.last = now
+		if b.tokens >= 1 {
+			b.tokens--
+			return nil
+		}
+		d := time.Duration((1 - b.tokens) / bucketRate * float64(time.Second))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+		}
+	}
+}
+
+// withRateLimitRetry retries a call that cmux rate-limited, honoring its
+// retry_after_ms hint.
+func withRateLimitRetry(ctx context.Context, call func() (json.RawMessage, error)) (json.RawMessage, error) {
+	for attempt := 0; ; attempt++ {
+		res, err := call()
+		var rerr *RPCError
+		if attempt >= 5 || !errors.As(err, &rerr) {
+			return res, err
+		}
+		d, ok := rerr.retryAfter()
+		if !ok {
+			return res, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(d):
+		}
+	}
 }
 
 func (e *RPCError) Error() string { return e.Code + ": " + e.Message }
@@ -102,10 +183,11 @@ func Dial(ctx context.Context, mode, socketPath, cliPath string) (Caller, error)
 type SocketCaller struct {
 	Path string
 
-	mu   sync.Mutex
-	conn net.Conn
-	rd   *bufio.Reader
-	next int
+	mu     sync.Mutex
+	bucket bucket
+	conn   net.Conn
+	rd     *bufio.Reader
+	next   int
 }
 
 func (s *SocketCaller) Name() string { return "socket " + s.Path }
@@ -124,13 +206,20 @@ func (s *SocketCaller) Close() error {
 func (s *SocketCaller) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.callLocked(ctx, method, params)
-	if err != nil && !isRPCError(err) && s.conn != nil {
-		// Drop the connection; the next call redials.
-		s.conn.Close()
-		s.conn = nil
-	}
-	return res, err
+	return withRateLimitRetry(ctx, func() (json.RawMessage, error) {
+		if pollingMethods[method] {
+			if err := s.bucket.wait(ctx); err != nil {
+				return nil, err
+			}
+		}
+		res, err := s.callLocked(ctx, method, params)
+		if err != nil && !isRPCError(err) && s.conn != nil {
+			// Drop the connection; the next call redials.
+			s.conn.Close()
+			s.conn = nil
+		}
+		return res, err
+	})
 }
 
 func (s *SocketCaller) callLocked(ctx context.Context, method string, params any) (json.RawMessage, error) {

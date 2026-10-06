@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/savvychez/ray/internal/cmux"
@@ -43,6 +44,8 @@ type Backend interface {
 // CmuxBackend implements Backend on top of the cmux v2 API.
 type CmuxBackend struct {
 	C cmux.Caller
+
+	noSystemTree bool // set once cmux says it lacks system.tree
 }
 
 func (b *CmuxBackend) Name() string { return b.C.Name() }
@@ -58,7 +61,75 @@ func (b *CmuxBackend) call(ctx context.Context, method string, params map[string
 	return json.Unmarshal(raw, out)
 }
 
+// Tree returns every workspace in every window with its surfaces. It uses
+// one system.tree call: cmux rate-limits polling per connection (a burst of
+// 9 calls), so a surface.list per workspace starves on bigger setups.
 func (b *CmuxBackend) Tree(ctx context.Context) ([]Workspace, error) {
+	if !b.noSystemTree {
+		ws, err := b.systemTree(ctx)
+		if err == nil {
+			return ws, nil
+		}
+		var rerr *cmux.RPCError
+		if !errors.As(err, &rerr) || (rerr.Code != "method_not_found" && rerr.Code != "invalid_params") {
+			return nil, err
+		}
+		b.noSystemTree = true // older cmux; fall back for good
+	}
+	return b.listTree(ctx)
+}
+
+func (b *CmuxBackend) systemTree(ctx context.Context) ([]Workspace, error) {
+	var t struct {
+		Windows []struct {
+			Key        bool `json:"key"`
+			Workspaces []struct {
+				ID       string `json:"id"`
+				Index    int    `json:"index"`
+				Title    string `json:"title"`
+				Selected bool   `json:"selected"`
+				Panes    []struct {
+					Surfaces []Surface `json:"surfaces"`
+				} `json:"panes"`
+			} `json:"workspaces"`
+		} `json:"windows"`
+	}
+	if err := b.call(ctx, "system.tree", map[string]any{"all_windows": true}, &t); err != nil {
+		return nil, err
+	}
+	// "Frontmost" is the selected workspace of the key window, or of the
+	// first window when cmux isn't the active app (no window is key then).
+	front := 0
+	for i, win := range t.Windows {
+		if win.Key {
+			front = i
+			break
+		}
+	}
+	out := []Workspace{}
+	for wi, win := range t.Windows {
+		for _, w := range win.Workspaces {
+			ws := Workspace{ID: w.ID, Index: w.Index, Title: w.Title, Selected: w.Selected && wi == front}
+			seen := map[string]bool{}
+			for _, p := range w.Panes {
+				for _, s := range p.Surfaces {
+					if seen[s.ID] {
+						continue
+					}
+					seen[s.ID] = true
+					s.Index = len(ws.Surfaces)
+					ws.Surfaces = append(ws.Surfaces, s)
+				}
+			}
+			out = append(out, ws)
+		}
+	}
+	return out, nil
+}
+
+// listTree is the pre-system.tree fallback: workspace.list plus one
+// surface.list per workspace.
+func (b *CmuxBackend) listTree(ctx context.Context) ([]Workspace, error) {
 	var wl struct {
 		Workspaces []Workspace `json:"workspaces"`
 	}
