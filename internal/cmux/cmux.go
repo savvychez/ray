@@ -183,11 +183,12 @@ func Dial(ctx context.Context, mode, socketPath, cliPath string) (Caller, error)
 type SocketCaller struct {
 	Path string
 
-	mu     sync.Mutex
-	bucket bucket
-	conn   net.Conn
-	rd     *bufio.Reader
-	next   int
+	mu       sync.Mutex
+	bucket   bucket
+	conn     net.Conn
+	lastUsed time.Time
+	rd       *bufio.Reader
+	next     int
 }
 
 func (s *SocketCaller) Name() string { return "socket " + s.Path }
@@ -212,17 +213,49 @@ func (s *SocketCaller) Call(ctx context.Context, method string, params any) (jso
 				return nil, err
 			}
 		}
+		reused := s.conn != nil
 		res, err := s.callLocked(ctx, method, params)
-		if err != nil && !isRPCError(err) && s.conn != nil {
-			// Drop the connection; the next call redials.
-			s.conn.Close()
-			s.conn = nil
+		if err == nil || isRPCError(err) {
+			return res, err
+		}
+		s.dropLocked()
+		// cmux closes connections that sit idle, so a reused one can be
+		// dead. Redial and retry once when that can't duplicate an effect:
+		// the request never went out, or it's a read-only poll.
+		var we *writeError
+		if reused && ctx.Err() == nil && (errors.As(err, &we) || pollingMethods[method]) {
+			res, err = s.callLocked(ctx, method, params)
+			if err != nil && !isRPCError(err) {
+				s.dropLocked()
+			}
 		}
 		return res, err
 	})
 }
 
+func (s *SocketCaller) dropLocked() {
+	if s.conn != nil {
+		s.conn.Close()
+		s.conn = nil
+	}
+}
+
+// writeError marks a failure to send a request, which therefore never
+// reached cmux.
+type writeError struct{ err error }
+
+func (e *writeError) Error() string { return e.err.Error() }
+func (e *writeError) Unwrap() error { return e.err }
+
+// maxIdle is how long a connection may sit unused before we redial instead
+// of reusing it; cmux closes client connections after 30s without a request.
+var maxIdle = 20 * time.Second
+
 func (s *SocketCaller) callLocked(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if s.conn != nil && time.Since(s.lastUsed) > maxIdle {
+		s.dropLocked()
+	}
+	s.lastUsed = time.Now()
 	if s.conn == nil {
 		var d net.Dialer
 		c, err := d.DialContext(ctx, "unix", s.Path)
@@ -244,7 +277,7 @@ func (s *SocketCaller) callLocked(ctx context.Context, method string, params any
 		return nil, err
 	}
 	if _, err := s.conn.Write(append(line, '\n')); err != nil {
-		return nil, err
+		return nil, &writeError{err}
 	}
 	for {
 		b, err := s.rd.ReadBytes('\n')
