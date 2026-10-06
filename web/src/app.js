@@ -403,7 +403,7 @@ function renderTree() {
     wrap.className = "ws";
     const terms = (ws.surfaces || []).filter(isTerminal);
     const row = document.createElement("button");
-    row.className = "row" + (ui.sel?.ws === ws.id && (ws.surfaces || []).length <= 1 ? " active" : "");
+    row.className = "row" + (ui.sel?.ws === ws.id && ((ws.surfaces || []).length <= 1 || !ui.sel.sf) ? " active" : "");
     row.innerHTML = termGlyph;
     const l = document.createElement("span");
     l.className = "label";
@@ -421,11 +421,21 @@ function renderTree() {
       b.textContent = ws.surfaces.length;
       row.append(b);
     }
+    if (ws.error) {
+      const b = document.createElement("span");
+      b.className = "badge warn";
+      b.textContent = "!";
+      row.append(b);
+      row.title = ws.error;
+    }
     row.onclick = () => {
       const s = terms.find((s) => s.focused) || terms[0];
-      if (s) select(ws.id, s.id);
+      // With no terminal listed (cmux couldn't list the workspace, or only
+      // non-terminal panels showed up), watch the workspace itself: cmux
+      // reads its focused terminal, and any failure shows in the banner.
+      select(ws.id, s ? s.id : "");
+      if (!s && ws.error) showBanner(`${ws.title || "Workspace"}: ${ws.error}`, "err");
     };
-    if (!terms.length) row.disabled = true;
     wrap.append(row);
     if ((ws.surfaces || []).length > 1) {
       const sub = document.createElement("div");
@@ -488,7 +498,8 @@ function showWelcome(on) {
 
 // ---------- terminal view ----------
 
-const key = (ws, sf) => ws + "/" + sf;
+// Empty ids are omitted on the wire, so normalize undefined to "".
+const key = (ws, sf) => (ws || "") + "/" + (sf || "");
 
 function atBottom() {
   return termEl.scrollHeight - termEl.scrollTop - termEl.clientHeight < 40;
@@ -532,7 +543,7 @@ function onTree(workspaces) {
   ui.tree = workspaces || [];
   // Keep the current selection if it still exists; otherwise restore the
   // last one for this host, else follow what's frontmost on the Mac.
-  const exists = (s) => s && ui.tree.some((w) => w.id === s.ws && (w.surfaces || []).some((x) => x.id === s.sf));
+  const exists = (s) => s && ui.tree.some((w) => w.id === s.ws && (!s.sf || (w.surfaces || []).some((x) => x.id === s.sf)));
   if (!exists(ui.sel)) {
     let next = store.get("sel." + currentAddr, null);
     if (!exists(next)) {

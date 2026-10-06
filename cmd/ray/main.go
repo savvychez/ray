@@ -5,6 +5,7 @@
 //	ray devices    list paired devices
 //	ray revoke X   unpair a device by name or key
 //	ray addr       print the server's tailcat address
+//	ray tree       print the workspaces and surfaces cmux reports (debugging)
 package main
 
 import (
@@ -60,6 +61,8 @@ func main() {
 		err = revoke(args)
 	case "addr":
 		err = addr(args)
+	case "tree":
+		err = tree(args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -82,6 +85,7 @@ usage:
   ray devices         list paired devices
   ray revoke <name>   unpair a device
   ray addr            print this machine's tailcat address
+  ray tree            show what cmux reports for each workspace (debugging)
 
 run "ray serve -h" for server flags.
 `)
@@ -363,6 +367,43 @@ func addr(args []string) error {
 		return err
 	}
 	fmt.Println(pk.Public.Addr())
+	return nil
+}
+
+func tree(args []string) error {
+	fs := flag.NewFlagSet("tree", flag.ExitOnError)
+	backendMode := fs.String("backend", "auto", "how to reach cmux: auto, socket, or cli")
+	socketPath := fs.String("socket", cmux.DefaultSocketPath(), "cmux socket path")
+	cliPath := fs.String("cmux", "", "path to the cmux CLI")
+	fs.Parse(args)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	c, err := cmux.Dial(ctx, *backendMode, *socketPath, *cliPath)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	fmt.Printf("backend: %s\n", c.Name())
+	b := &server.CmuxBackend{C: c}
+	wss, err := b.Tree(ctx)
+	if err != nil {
+		return err
+	}
+	for _, ws := range wss {
+		front := ""
+		if ws.Selected {
+			front = "  (frontmost)"
+		}
+		fmt.Printf("\n%s  [%s]%s\n", ws.Title, ws.ID, front)
+		if ws.Error != "" {
+			fmt.Printf("  surface.list error: %s\n", ws.Error)
+		} else if len(ws.Surfaces) == 0 {
+			fmt.Println("  (no surfaces)")
+		}
+		for _, s := range ws.Surfaces {
+			fmt.Printf("  - %-10s %s  [%s]\n", s.Type, s.Title, s.ID)
+		}
+	}
 	return nil
 }
 
