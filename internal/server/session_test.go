@@ -98,8 +98,16 @@ func pipeSession(t *testing.T, b Backend) (send func(Msg), frames <-chan Msg) {
 	t.Helper()
 	srvConn, cli := net.Pipe()
 	srv := &Server{Backend: b, Logf: t.Logf, ScreenFast: 20 * time.Millisecond, ScreenSlow: 20 * time.Millisecond, TreeEvery: time.Hour}
-	go srv.Serve(srvConn)
-	t.Cleanup(func() { cli.Close() })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.Serve(srvConn)
+	}()
+	// Wait for the session to exit so it can't log after the test ends.
+	t.Cleanup(func() {
+		cli.Close()
+		<-done
+	})
 	ch := make(chan Msg, 256)
 	go func() {
 		rd := bufio.NewReader(cli)
@@ -175,8 +183,15 @@ func TestWatchNothingStopsStreaming(t *testing.T) {
 			break
 		}
 	}
-	send(Msg{T: "watch"})
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the server to have handled the stop (its ack), rather than
+	// guessing with a sleep.
+	send(Msg{T: "watch", ID: 1})
+	for m := range frames {
+		if m.T == "ack" && m.ID == 1 {
+			break
+		}
+	}
+	time.Sleep(50 * time.Millisecond) // let a read already in flight finish
 	n := b.readCount()
 	time.Sleep(200 * time.Millisecond)
 	if d := b.readCount() - n; d > 0 {
