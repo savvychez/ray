@@ -360,7 +360,7 @@ function setConnState(s, detail) {
     idle: "Not connected",
   }[s] || s;
   $("conn-label").textContent = label;
-  $("composer").classList.toggle("disabled", s !== "online" || !ui.sel);
+  $("composer").classList.toggle("disabled", s !== "online" || !ui.sel || !!ui.sel.info);
   if (s === "online") showBanner(null);
   else if (s === "offline") showBanner(`Can't reach ${currentHost()?.name || "the Mac"}: ${detail || "offline"}. Retrying…`);
   else if (s === "unauthorized") {
@@ -402,9 +402,12 @@ function renderTree() {
     const wrap = document.createElement("div");
     wrap.className = "ws";
     const terms = (ws.surfaces || []).filter(isTerminal);
+    // Listed, but nothing ray can stream (e.g. only browser tabs).
+    const noTerms = (ws.surfaces || []).length > 0 && terms.length === 0;
     const row = document.createElement("button");
-    row.className = "row" + (ui.sel?.ws === ws.id && ((ws.surfaces || []).length <= 1 || !ui.sel.sf) ? " active" : "");
-    row.innerHTML = termGlyph;
+    row.className = "row" + (noTerms ? " muted" : "") +
+      (ui.sel?.ws === ws.id && ((ws.surfaces || []).length <= 1 || !ui.sel.sf) ? " active" : "");
+    row.innerHTML = noTerms ? webGlyph : termGlyph;
     const l = document.createElement("span");
     l.className = "label";
     l.textContent = ws.title || `Workspace ${ws.index + 1}`;
@@ -429,6 +432,7 @@ function renderTree() {
       row.title = ws.error;
     }
     row.onclick = () => {
+      if (noTerms) return showInfo(ws);
       const s = terms.find((s) => s.focused) || terms[0];
       // With no terminal listed (cmux couldn't list the workspace, or only
       // non-terminal panels showed up), watch the workspace itself: cmux
@@ -513,6 +517,15 @@ function renderScreen() {
     empty.textContent = ui.link?.state === "online" ? "Pick a terminal from the sidebar." : "";
     return;
   }
+  if (ui.sel.info) {
+    const ws = ui.tree.find((w) => w.id === ui.sel.ws);
+    const kinds = [...new Set((ws?.surfaces || []).map((s) => s.type || "panel"))].join(" and ");
+    termEl.textContent = "";
+    empty.hidden = false;
+    empty.textContent = `${ws?.title || "This workspace"} only has ${kinds || "non-terminal"} tabs. ray can only show terminals. Use ⋯ → Show on Mac to bring it up there.`;
+    $("jump-btn").hidden = true;
+    return;
+  }
   const lines = ui.screens.get(key(ui.sel.ws, ui.sel.sf));
   empty.hidden = !!lines;
   if (!lines) {
@@ -527,8 +540,28 @@ function renderScreen() {
   $("jump-btn").hidden = atBottom();
 }
 
+// showInfo selects a workspace that has no terminal to stream and says so
+// in the main pane, instead of asking cmux to read a browser tab.
+function showInfo(ws) {
+  ui.sel = { ws: ws.id, sf: "", info: true };
+  ui.link?.write({ t: "watch" }); // stop streaming the previous terminal
+  clearErrorBanner();
+  renderTree();
+  renderScreen();
+  updateTitle();
+  setDrawer(false);
+  $("composer").classList.add("disabled");
+}
+
+// clearErrorBanner hides a banner about a terminal's errors, but leaves
+// connection banners (offline, not paired) alone since they apply everywhere.
+function clearErrorBanner() {
+  if (ui.link?.state === "online") showBanner(null);
+}
+
 function select(ws, sf) {
   ui.sel = { ws, sf };
+  clearErrorBanner();
   store.set("sel." + currentAddr, ui.sel);
   termEl.dataset.fresh = "1";
   ui.link?.write({ t: "watch", ws, sf });
@@ -557,6 +590,16 @@ function onTree(workspaces) {
   }
   renderTree();
   updateTitle();
+}
+
+// onNotice shows (or, with no error, clears) a server notice. Notices about
+// a terminal only count while that terminal is the one on screen, so a
+// late error from the tab you just left doesn't follow you.
+function onNotice(m) {
+  if (m.ws || m.sf) {
+    if (!ui.sel || ui.sel.info || key(m.ws, m.sf) !== key(ui.sel.ws, ui.sel.sf)) return;
+  }
+  showBanner(m.error || null, "err");
 }
 
 function onScreen(m) {
@@ -784,14 +827,14 @@ function switchHost(addr) {
   ui.link = new Link(h, {
     onState: (s, d) => {
       setConnState(s, d);
-      if (s === "online" && ui.sel) ui.link.write({ t: "watch", ws: ui.sel.ws, sf: ui.sel.sf });
+      if (s === "online" && ui.sel && !ui.sel.info) ui.link.write({ t: "watch", ws: ui.sel.ws, sf: ui.sel.sf });
       renderTree();
       renderScreen();
     },
     onFrame: (m) => {
       if (m.t === "tree") onTree(m.workspaces);
       else if (m.t === "screen") onScreen(m);
-      else if (m.t === "notice") showBanner(m.error, "err");
+      else if (m.t === "notice") onNotice(m);
     },
     onNotice: (t) => showBanner(t, "err"),
   });

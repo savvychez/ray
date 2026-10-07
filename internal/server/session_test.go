@@ -1,9 +1,17 @@
 package server
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/savvychez/ray/internal/cmux"
 )
 
 func apply(prev []string, drop, keep int, add []string) []string {
@@ -53,5 +61,125 @@ func TestBase32Code(t *testing.T) {
 	a, b := p.NewCode(0), p.NewCode(0)
 	if a == b || len(a) != 26 {
 		t.Fatalf("codes %q %q", a, b)
+	}
+}
+
+// flakyBackend wraps FakeBackend; ReadText fails while failReads > 0.
+type flakyBackend struct {
+	*FakeBackend
+	mu        sync.Mutex
+	failReads int
+	reads     int
+}
+
+func (f *flakyBackend) ReadText(ctx context.Context, ws, sf string, lines int) (string, error) {
+	f.mu.Lock()
+	f.reads++
+	fail := f.failReads > 0
+	if fail {
+		f.failReads--
+	}
+	f.mu.Unlock()
+	if fail {
+		return "", fmt.Errorf("surface.read_text: %w", &cmux.RPCError{Code: "internal_error", Message: "Failed to read terminal text"})
+	}
+	return f.FakeBackend.ReadText(ctx, ws, sf, lines)
+}
+
+func (f *flakyBackend) readCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reads
+}
+
+// pipeSession serves one session over an in-memory pipe and returns a
+// channel of frames from the server.
+func pipeSession(t *testing.T, b Backend) (send func(Msg), frames <-chan Msg) {
+	t.Helper()
+	srvConn, cli := net.Pipe()
+	srv := &Server{Backend: b, Logf: t.Logf, ScreenFast: 20 * time.Millisecond, ScreenSlow: 20 * time.Millisecond, TreeEvery: time.Hour}
+	go srv.Serve(srvConn)
+	t.Cleanup(func() { cli.Close() })
+	ch := make(chan Msg, 256)
+	go func() {
+		rd := bufio.NewReader(cli)
+		for {
+			line, err := rd.ReadBytes('\n')
+			if err != nil {
+				close(ch)
+				return
+			}
+			var m Msg
+			json.Unmarshal(line, &m)
+			ch <- m
+		}
+	}()
+	enc := json.NewEncoder(cli)
+	send = func(m Msg) {
+		if err := enc.Encode(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send(Msg{T: "hello", Name: "test"})
+	return send, ch
+}
+
+func TestTransientReadErrorsAreQuiet(t *testing.T) {
+	fb := NewFakeBackend()
+	tree, _ := fb.Tree(context.Background())
+	ws, sf := tree[0].ID, tree[0].Surfaces[0].ID
+
+	for _, tc := range []struct {
+		fails      int
+		wantNotice bool
+	}{{2, false}, {10, true}} {
+		t.Run(fmt.Sprint("fails=", tc.fails), func(t *testing.T) {
+			b := &flakyBackend{FakeBackend: fb, failReads: tc.fails}
+			send, frames := pipeSession(t, b)
+			send(Msg{T: "watch", WS: ws, SF: sf})
+			var gotNotice, gotScreen, gotClear bool
+			timeout := time.After(5 * time.Second)
+			for !gotScreen {
+				select {
+				case m := <-frames:
+					switch {
+					case m.T == "notice" && m.Err != "":
+						gotNotice = true
+					case m.T == "notice":
+						gotClear = true
+					case m.T == "screen":
+						gotScreen = true
+					}
+				case <-timeout:
+					t.Fatal("no screen frame")
+				}
+			}
+			if gotNotice != tc.wantNotice {
+				t.Errorf("notice shown = %v, want %v", gotNotice, tc.wantNotice)
+			}
+			if gotNotice && !gotClear {
+				t.Error("notice was never cleared after recovery")
+			}
+		})
+	}
+}
+
+func TestWatchNothingStopsStreaming(t *testing.T) {
+	fb := NewFakeBackend()
+	tree, _ := fb.Tree(context.Background())
+	b := &flakyBackend{FakeBackend: fb}
+	send, frames := pipeSession(t, b)
+	send(Msg{T: "watch", WS: tree[0].ID, SF: tree[0].Surfaces[0].ID})
+	for m := range frames {
+		if m.T == "screen" {
+			break
+		}
+	}
+	send(Msg{T: "watch"})
+	time.Sleep(100 * time.Millisecond)
+	n := b.readCount()
+	time.Sleep(200 * time.Millisecond)
+	if d := b.readCount() - n; d > 0 {
+		t.Fatalf("still reading after stop: %d more reads", d)
 	}
 }
