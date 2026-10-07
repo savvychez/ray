@@ -10,6 +10,44 @@ const DEFAULT_DERP_MAP = "https://tailcat.dev/derpmap.json";
 const APP_COMMIT = "__APP_COMMIT__";
 const APP_BUILT = "__APP_BUILT__";
 const appVersion = APP_COMMIT.startsWith("__") ? "dev" : APP_COMMIT;
+
+// ---------- diagnostics ----------
+// A small event log kept in localStorage so it survives reloads and a page
+// that iOS killed in the background. Shown under ⋯ → Diagnostics.
+const diag = {
+  KEY: "ray.diag",
+  MAX: 300,
+  read() {
+    try { return JSON.parse(localStorage.getItem(this.KEY)) || []; } catch { return []; }
+  },
+  log(ev, info) {
+    try {
+      const l = this.read();
+      l.push({ t: Date.now(), ev, ...(info ? { i: info } : {}) });
+      localStorage.setItem(this.KEY, JSON.stringify(l.slice(-this.MAX)));
+    } catch {}
+  },
+  clear() { try { localStorage.removeItem(this.KEY); } catch {} },
+  text() {
+    const l = this.read();
+    const fmt = (t) => new Date(t).toLocaleTimeString([], { hour12: false }) + "." + String(t % 1000).padStart(3, "0");
+    return l.map((e, k) => {
+      const gap = k ? ` (+${((e.t - l[k - 1].t) / 1000).toFixed(1)}s)` : "";
+      return `${fmt(e.t)}${gap} ${e.ev}${e.i ? " " + (typeof e.i === "string" ? e.i : JSON.stringify(e.i)) : ""}`;
+    }).join("\n");
+  },
+};
+{
+  const prev = diag.read().at(-1);
+  diag.log("boot", {
+    v: appVersion,
+    standalone: !!(navigator.standalone || matchMedia("(display-mode: standalone)").matches),
+    prev: prev ? prev.ev : null, // what the last session did before this boot
+    nav: performance.getEntriesByType?.("navigation")?.[0]?.type,
+    h: innerHeight,
+    vv: Math.round(visualViewport?.height || 0),
+  });
+}
 const $ = (id) => document.getElementById(id);
 
 // ---------- storage ----------
@@ -115,7 +153,8 @@ window.addEventListener("orientationchange", () => setTimeout(repaint, 300));
 window.addEventListener("pageshow", (e) => {
   // Restored from the back-forward cache: same stale state as a long
   // background, so start fresh.
-  if (e.persisted) return reloadFresh();
+  diag.log("pageshow", { persisted: e.persisted });
+  if (e.persisted) return reloadFresh("bfcache");
   repaint();
 });
 window.addEventListener("focus", repaint);
@@ -125,7 +164,8 @@ window.addEventListener("focus", repaint);
 // place. The selected terminal is remembered; the composer draft is kept.
 const RELOAD_AFTER_HIDDEN_MS = 45 * 1000;
 let hiddenAt = 0;
-function reloadFresh() {
+function reloadFresh(reason) {
+  diag.log("reload", reason || "");
   try {
     const draft = document.getElementById("input")?.value;
     if (draft) sessionStorage.setItem("ray.draft", draft);
@@ -135,11 +175,34 @@ function reloadFresh() {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     hiddenAt = Date.now();
+    diag.log("hidden");
     return;
   }
-  if (hiddenAt && Date.now() - hiddenAt > RELOAD_AFTER_HIDDEN_MS) return reloadFresh();
+  const away = hiddenAt ? Date.now() - hiddenAt : 0;
+  hiddenAt = 0;
+  diag.log("visible", { away: Math.round(away / 1000) + "s", h: innerHeight, vv: Math.round(visualViewport?.height || 0) });
+  if (away > RELOAD_AFTER_HIDDEN_MS) return reloadFresh("away " + Math.round(away / 1000) + "s");
   repaint();
 });
+window.addEventListener("pagehide", (e) => diag.log("pagehide", { persisted: e.persisted }));
+document.addEventListener("freeze", () => diag.log("freeze"));
+document.addEventListener("resume", () => diag.log("resume"));
+
+// Heartbeat: if timers stopped for a long stretch while we weren't told we
+// were hidden (iOS doesn't always send visibilitychange), treat it like a
+// long background on the next tick.
+{
+  let beat = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const gap = now - beat;
+    beat = now;
+    if (gap > 10000) {
+      diag.log("stall", { gap: Math.round(gap / 1000) + "s", hidden: document.hidden });
+      if (!document.hidden && gap > RELOAD_AFTER_HIDDEN_MS && !hiddenAt) reloadFresh("stall " + Math.round(gap / 1000) + "s");
+    }
+  }, 2000);
+}
 // The keyboard closing doesn't always fire a viewport resize on iOS.
 document.addEventListener("focusout", () => setTimeout(fitViewport, 50));
 document.addEventListener("focusin", () => setTimeout(fitViewport, 50));
@@ -959,6 +1022,7 @@ $("opts-menu").addEventListener("click", async (e) => {
   if (act === "font+") prefs.font = Math.min(prefs.font + 1, 22);
   if (act === "font-") prefs.font = Math.max(prefs.font - 1, 8);
   if (act === "reconnect") ui.link?.retry("reconnecting");
+  if (act === "diag") return showDiagnostics();
   if (act === "focus" && ui.sel) {
     try { await ui.link?.request({ t: "focus", ws: ui.sel.ws, sf: ui.sel.sf }); } catch (err) { showBanner(err.message, "err"); }
   }
@@ -988,6 +1052,35 @@ window.addEventListener("hashchange", () => {
   switchHost(p.addr);
 });
 
+// ---------- diagnostics panel ----------
+
+function showDiagnostics() {
+  const panel = $("diag");
+  const body = $("diag-text");
+  const header = `ray app ${appVersion} · Mac ${serverVersion || "?"} · ${navigator.userAgent}\n`;
+  body.textContent = header + (diag.text() || "(empty)");
+  panel.hidden = false;
+  body.scrollTop = body.scrollHeight;
+}
+$("diag-close").onclick = () => { $("diag").hidden = true; };
+$("diag-clear").onclick = () => { diag.clear(); showDiagnostics(); };
+$("diag-copy").onclick = async () => {
+  const text = $("diag-text").textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    $("diag-copy").textContent = "Copied";
+  } catch {
+    // Fallback: select it so the user can copy by hand.
+    const r = document.createRange();
+    r.selectNodeContents($("diag-text"));
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    $("diag-copy").textContent = "Selected";
+  }
+  setTimeout(() => { $("diag-copy").textContent = "Copy"; }, 1500);
+};
+
 // ---------- host switching ----------
 
 function switchHost(addr) {
@@ -1009,6 +1102,7 @@ function switchHost(addr) {
   showWelcome(false);
   ui.link = new Link(h, {
     onState: (s, d) => {
+      if (s !== "connecting") diag.log("conn", d && typeof d === "string" ? `${s}: ${d}` : s);
       setConnState(s, d);
       if (s === "online" && ui.sel && !ui.sel.info) ui.link.write({ t: "watch", ws: ui.sel.ws, sf: ui.sel.sf });
       renderTree();

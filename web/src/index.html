@@ -57,6 +57,7 @@
         <button data-act="font+">Larger text</button>
         <button data-act="font-">Smaller text</button>
         <button data-act="reconnect">Reconnect</button>
+        <button data-act="diag">Diagnostics</button>
       </div>
     </header>
 
@@ -115,6 +116,18 @@
       </form>
     </footer>
   </main>
+</div>
+
+<div id="diag" class="diag" hidden role="dialog" aria-label="Diagnostics">
+  <div class="diag-head">
+    <strong>Diagnostics</strong>
+    <span class="diag-actions">
+      <button id="diag-copy">Copy</button>
+      <button id="diag-clear">Clear</button>
+      <button id="diag-close">Close</button>
+    </span>
+  </div>
+  <pre id="diag-text" class="diag-text"></pre>
 </div>
 
 <div id="loader" class="loader">
