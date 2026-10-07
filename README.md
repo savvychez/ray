@@ -56,6 +56,8 @@ lets only processes started inside cmux connect, so you have two options:
   straight to the terminal, for TUIs like Claude Code, vim, or less.
 - **Key bar**: esc, tab, a sticky ctrl, ^C, arrow keys, ⌫, ⏎, ^D, ^L, ^R, ^Z.
 - **⋯ menu**: show this terminal on the Mac, wrap lines, text size, reconnect.
+  You can also pinch the terminal to change its text size; the page itself
+  doesn't zoom.
 - **Versions**: the bottom of the sidebar shows the app's build (commit and
   build time) and the Mac's (`ray version`). When a new app release has
   downloaded, a banner offers to reload into it.
