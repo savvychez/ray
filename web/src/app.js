@@ -163,6 +163,8 @@ window.addEventListener("focus", repaint);
 // anyway. So past a short absence, reload instead of trying to recover in
 // place. The selected terminal is remembered; the composer draft is kept.
 const RELOAD_AFTER_HIDDEN_MS = 45 * 1000;
+// A frozen timer this long means iOS suspended the page; see the heartbeat.
+const RELOAD_AFTER_STALL_MS = 20 * 1000;
 let hiddenAt = 0;
 function reloadFresh(reason) {
   diag.log("reload", reason || "");
@@ -188,9 +190,8 @@ window.addEventListener("pagehide", (e) => diag.log("pagehide", { persisted: e.p
 document.addEventListener("freeze", () => diag.log("freeze"));
 document.addEventListener("resume", () => diag.log("resume"));
 
-// Heartbeat: if timers stopped for a long stretch while we weren't told we
-// were hidden (iOS doesn't always send visibilitychange), treat it like a
-// long background on the next tick.
+// Heartbeat: if timers stopped for a long stretch, treat it like a long
+// background on the next tick (iOS doesn't always send visibilitychange).
 {
   let beat = Date.now();
   setInterval(() => {
@@ -198,8 +199,12 @@ document.addEventListener("resume", () => diag.log("resume"));
     const gap = now - beat;
     beat = now;
     if (gap > 10000) {
-      diag.log("stall", { gap: Math.round(gap / 1000) + "s", hidden: document.hidden });
-      if (!document.hidden && gap > RELOAD_AFTER_HIDDEN_MS && !hiddenAt) reloadFresh("stall " + Math.round(gap / 1000) + "s");
+      diag.log("stall", { gap: Math.round(gap / 1000) + "s", hidden: document.hidden, vis: document.visibilityState, focus: document.hasFocus() });
+      // Seen on iOS: on return the page's timers resume but it still reports
+      // hidden, gets no visibilitychange, and isn't repainted (black screen).
+      // So reload after any long freeze, whatever visibility claims; if we
+      // really are in the background, the reload is harmless.
+      if (gap > RELOAD_AFTER_STALL_MS) reloadFresh("stall " + Math.round(gap / 1000) + "s");
     }
   }, 2000);
 }
