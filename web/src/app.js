@@ -5,6 +5,11 @@
 // stream; see internal/server/session.go.
 
 const DEFAULT_DERP_MAP = "https://tailcat.dev/derpmap.json";
+
+// Stamped by web/build.sh; unbuilt sources show "dev".
+const APP_COMMIT = "__APP_COMMIT__";
+const APP_BUILT = "__APP_BUILT__";
+const appVersion = APP_COMMIT.startsWith("__") ? "dev" : APP_COMMIT;
 const $ = (id) => document.getElementById(id);
 
 // ---------- storage ----------
@@ -257,6 +262,8 @@ class Link {
     switch (m.t) {
       case "welcome":
         this.backoff = 1000;
+        serverVersion = m.version || "";
+        renderVersion();
         if (this.host.pair) {
           delete this.host.pair; // one-time code consumed
           saveHosts();
@@ -841,11 +848,39 @@ function switchHost(addr) {
   ui.link.start();
 }
 
+// ---------- version ----------
+
+let serverVersion = "";
+
+function renderVersion() {
+  const built = APP_BUILT.startsWith("__") ? "" : new Date(APP_BUILT).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  let text = `app ${appVersion}` + (built ? ` · ${built}` : "");
+  if (serverVersion) text += `\nMac ${serverVersion}`;
+  $("version-label").textContent = text;
+  $("version-label").style.whiteSpace = "pre";
+}
+
+// The service worker installs a new release in the background, but this
+// page keeps running the old code until it reloads. Offer that reload.
+function watchForUpdates(reg) {
+  const offer = () => { $("update-banner").hidden = false; };
+  const track = (w) => w?.addEventListener("statechange", () => {
+    if (w.state === "activated" && navigator.serviceWorker.controller) offer();
+  });
+  if (reg.installing) track(reg.installing);
+  reg.addEventListener("updatefound", () => track(reg.installing));
+  // Check for a new release when the app comes back to the foreground.
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) reg.update().catch(() => {}); });
+}
+$("update-banner").onclick = () => location.reload();
+
 // ---------- start ----------
 
 applyPrefs();
+renderVersion();
 if ("serviceWorker" in navigator && location.protocol === "https:") {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register("sw.js").then((reg) => { if (hadController) watchForUpdates(reg); }).catch(() => {});
 }
 try {
   await bootWasm();
