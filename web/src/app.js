@@ -545,7 +545,7 @@ function renderScreen() {
 function showInfo(ws) {
   ui.sel = { ws: ws.id, sf: "", info: true };
   ui.link?.write({ t: "watch" }); // stop streaming the previous terminal
-  showBanner(null);
+  clearErrorBanner();
   renderTree();
   renderScreen();
   updateTitle();
@@ -553,8 +553,15 @@ function showInfo(ws) {
   $("composer").classList.add("disabled");
 }
 
+// clearErrorBanner hides a banner about a terminal's errors, but leaves
+// connection banners (offline, not paired) alone since they apply everywhere.
+function clearErrorBanner() {
+  if (ui.link?.state === "online") showBanner(null);
+}
+
 function select(ws, sf) {
   ui.sel = { ws, sf };
+  clearErrorBanner();
   store.set("sel." + currentAddr, ui.sel);
   termEl.dataset.fresh = "1";
   ui.link?.write({ t: "watch", ws, sf });
@@ -583,6 +590,16 @@ function onTree(workspaces) {
   }
   renderTree();
   updateTitle();
+}
+
+// onNotice shows (or, with no error, clears) a server notice. Notices about
+// a terminal only count while that terminal is the one on screen, so a
+// late error from the tab you just left doesn't follow you.
+function onNotice(m) {
+  if (m.ws || m.sf) {
+    if (!ui.sel || ui.sel.info || key(m.ws, m.sf) !== key(ui.sel.ws, ui.sel.sf)) return;
+  }
+  showBanner(m.error || null, "err");
 }
 
 function onScreen(m) {
@@ -817,7 +834,7 @@ function switchHost(addr) {
     onFrame: (m) => {
       if (m.t === "tree") onTree(m.workspaces);
       else if (m.t === "screen") onScreen(m);
-      else if (m.t === "notice") showBanner(m.error, "err");
+      else if (m.t === "notice") onNotice(m);
     },
     onNotice: (t) => showBanner(t, "err"),
   });
