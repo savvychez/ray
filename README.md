@@ -56,6 +56,9 @@ lets only processes started inside cmux connect, so you have two options:
   straight to the terminal, for TUIs like Claude Code, vim, or less.
 - **Key bar**: esc, tab, a sticky ctrl, ^C, arrow keys, ⌫, ⏎, ^D, ^L, ^R, ^Z.
 - **⋯ menu**: show this terminal on the Mac, wrap lines, text size, reconnect.
+- **Versions**: the bottom of the sidebar shows the app's build (commit and
+  build time) and the Mac's (`ray version`). When a new app release has
+  downloaded, a banner offers to reload into it.
 
 ray streams what cmux exposes through `surface.read_text`, which is plain text
 with no colors. The view refreshes about every 250 ms while you're typing and

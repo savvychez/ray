@@ -34,7 +34,7 @@ const ProtocolVersion = 1
 //
 // Server → client:
 //
-//	welcome {host, backend}
+//	welcome {host, backend, version}
 //	tree    {workspaces}           sent on connect and whenever it changes
 //	screen  {ws, sf, drop, keep, lines}
 //	                               drop the first `drop` lines, keep the next
@@ -53,6 +53,7 @@ type Msg struct {
 	Pair    string `json:"pair,omitempty"`
 	Host    string `json:"host,omitempty"`
 	Backend string `json:"backend,omitempty"`
+	Version string `json:"version,omitempty"`
 	Code    string `json:"code,omitempty"`
 
 	// targeting
@@ -79,6 +80,7 @@ type Server struct {
 	Backend  Backend
 	Auth     Authorizer
 	Hostname string
+	Version  string // ray build, reported to clients
 	Logf     func(format string, args ...any)
 
 	// Poll intervals; zero values use defaults.
@@ -167,7 +169,7 @@ func (ss *session) run() {
 	ss.srv.logf("session %v (%q): connected", ss.conn.RemoteAddr(), hello.Name)
 	defer ss.srv.logf("session %v (%q): disconnected", ss.conn.RemoteAddr(), hello.Name)
 
-	if err := enc.Encode(Msg{T: "welcome", V: ProtocolVersion, Host: ss.srv.Hostname, Backend: ss.srv.Backend.Name()}); err != nil {
+	if err := enc.Encode(Msg{T: "welcome", V: ProtocolVersion, Host: ss.srv.Hostname, Backend: ss.srv.Backend.Name(), Version: ss.srv.Version}); err != nil {
 		return
 	}
 

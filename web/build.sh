@@ -10,7 +10,11 @@ cp web/src/* "$out/"
 GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o "$out/ray.wasm" ./web/wasm
 gzip -9 -c "$out/ray.wasm" > "$out/ray.wasm.gz"
 cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$out/"
-version="$(git rev-parse --short HEAD 2>/dev/null || echo dev)-$(date +%s)"
+commit="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then commit="$commit-dirty"; fi
+built="$(date -u +%Y-%m-%dT%H:%MZ)"
+version="$commit-$(date +%s)" # service worker cache key: new on every build
 sed -i.bak "s/__VERSION__/$version/" "$out/sw.js" && rm -f "$out/sw.js.bak"
+sed -i.bak -e "s/__APP_COMMIT__/$commit/" -e "s/__APP_BUILT__/$built/" "$out/app.js" && rm -f "$out/app.js.bak"
 touch "$out/.nojekyll"
 echo "built $out ($(du -h "$out/ray.wasm.gz" | cut -f1) wasm.gz, version $version)"
