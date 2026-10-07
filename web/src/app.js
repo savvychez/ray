@@ -78,16 +78,47 @@ function adoptPairLink(p) {
 
 // ---------- viewport (iOS keyboard) ----------
 
-if (window.visualViewport) {
+// iOS doesn't shrink the layout for the on-screen keyboard, so the app is
+// sized to the visual viewport. That height is only trusted while a text
+// field has focus; otherwise use the full window, so a stale keyboard-era
+// height (e.g. the app was backgrounded with the keyboard up) can't leave
+// the app short with a strip of page showing below it.
+function fitViewport() {
   const vv = window.visualViewport;
-  const fit = () => {
-    document.documentElement.style.setProperty("--vh", vv.height + "px");
-    if (vv.offsetTop) window.scrollTo(0, 0);
-  };
-  vv.addEventListener("resize", fit);
-  vv.addEventListener("scroll", fit);
-  fit();
+  const typing = document.activeElement?.matches?.("textarea, input");
+  const h = vv && typing ? vv.height : Math.max(vv?.height || 0, window.innerHeight);
+  document.documentElement.style.setProperty("--vh", h + "px");
+  if (vv?.offsetTop) window.scrollTo(0, 0);
 }
+
+// After being backgrounded, iOS standalone web apps sometimes come back
+// with the page unpainted (a black screen until reload). Re-measure and
+// nudge the compositor to redraw everything.
+function repaint() {
+  fitViewport();
+  const app = document.getElementById("app");
+  if (!app) return;
+  app.style.transform = "translateZ(0)";
+  void app.offsetHeight; // force layout
+  requestAnimationFrame(() => {
+    app.style.transform = "";
+    fitViewport();
+  });
+}
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", fitViewport);
+  window.visualViewport.addEventListener("scroll", fitViewport);
+}
+window.addEventListener("resize", fitViewport);
+window.addEventListener("orientationchange", () => setTimeout(repaint, 300));
+window.addEventListener("pageshow", repaint);
+window.addEventListener("focus", repaint);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) repaint(); });
+// The keyboard closing doesn't always fire a viewport resize on iOS.
+document.addEventListener("focusout", () => setTimeout(fitViewport, 50));
+document.addEventListener("focusin", () => setTimeout(fitViewport, 50));
+fitViewport();
 
 // ---------- wasm boot ----------
 
