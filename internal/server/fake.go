@@ -31,9 +31,16 @@ type fakeTerm struct {
 func NewFakeBackend() *FakeBackend {
 	f := &FakeBackend{}
 	f.addWorkspace("~/ray")
-	f.addWorkspace("claude")
 	f.workspaces[0].Selected = true
 	f.addSurface(f.workspaces[0], "logs")
+	// A sidebar group, like cmux's: the header is itself a workspace (the
+	// anchor) with its own terminal, followed by its members.
+	agents := f.addWorkspace("agents")
+	claude := f.addWorkspace("claude")
+	g := &GroupRef{ID: "grp-1", Name: "agents"}
+	agents.Group = &GroupRef{ID: g.ID, Name: g.Name, Anchor: true}
+	claude.Group = g
+	f.addWorkspace("scratch")
 	return f
 }
 

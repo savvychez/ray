@@ -112,6 +112,23 @@ a { color: var(--accent); }
 .row .badge { font-size: 11px; color: var(--muted); flex: none; }
 .row .badge.warn { color: var(--warn); font-weight: 700; }
 .row .front { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+.group { margin: 2px 0; }
+.group-head { display: flex; align-items: center; border-radius: 10px; }
+.group-head.active { background: var(--sel); }
+.group-head .row { flex: 1; min-width: 0; padding-left: 4px; font-weight: 600; }
+.group-head.active .row:hover { background: transparent; }
+.chev-btn { width: 28px; height: 40px; flex: none; display: grid; place-items: center; color: var(--muted); border-radius: 8px; }
+.chev-btn svg { width: 14px; height: 14px; transition: transform .15s; }
+.chev-btn.open svg { transform: rotate(90deg); }
+.members { padding-left: 20px; }
+.tabs { display: flex; gap: 6px; overflow-x: auto; padding: 8px 8px 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex: none; display: flex; align-items: center; gap: 6px; max-width: 220px; height: 32px; padding: 0 12px 0 9px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg-elev); font-size: 13px; color: var(--muted); }
+.tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .glyph { width: 15px; height: 15px; flex: none; }
+.tab.active { color: var(--fg); border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.tab.active .glyph { color: var(--accent); }
+.tab[disabled] { opacity: .5; }
 .sub { padding-left: 18px; }
 .sub .row { min-height: 36px; padding: 7px 10px; font-size: 14px; }
 .row[disabled] { opacity: .45; cursor: default; }

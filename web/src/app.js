@@ -411,9 +411,9 @@ function updateTitle() {
   const h = currentHost();
   $("host-name").textContent = h ? h.name : "ray";
   const ws = ui.tree.find((w) => w.id === ui.sel?.ws);
-  const sf = ws?.surfaces?.find((s) => s.id === ui.sel?.sf);
   $("title").textContent = ws ? (ws.title || "Workspace") : (h ? h.name : "ray");
-  $("subtitle").textContent = ws ? [sf && ws.surfaces.length > 1 ? sf.title : null, h?.name].filter(Boolean).join(" · ") : "";
+  $("subtitle").textContent = ws ? [ws.group && !ws.group.anchor ? ws.group.name : null, h?.name].filter(Boolean).join(" · ") : "";
+  renderTabs();
   document.title = ws ? `${ws.title} · ray` : "ray";
 }
 
@@ -421,6 +421,117 @@ const termGlyph = '<svg class="glyph" viewBox="0 0 20 20" aria-hidden="true"><re
 const webGlyph = '<svg class="glyph" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3 10h14M10 3c2.5 2.5 2.5 11.5 0 14M10 3c-2.5 2.5-2.5 11.5 0 14" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
 
 const isTerminal = (s) => !s.type || /term/i.test(s.type);
+
+// Collapsed groups, per host; seeded from cmux's own collapsed state.
+function isCollapsed(g) {
+  const m = store.get("collapsed." + currentAddr, {});
+  return g.id in m ? m[g.id] : !!g.collapsed;
+}
+function setCollapsed(g, v) {
+  const m = store.get("collapsed." + currentAddr, {});
+  m[g.id] = v;
+  store.set("collapsed." + currentAddr, m);
+}
+
+const folderGlyph = '<svg class="glyph" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 6.2c0-1 .8-1.7 1.7-1.7h3.4l1.7 1.8h6.5c1 0 1.7.8 1.7 1.7v6.8c0 1-.8 1.7-1.7 1.7H4.2c-1 0-1.7-.8-1.7-1.7z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+const chevGlyph = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// openWorkspace shows a workspace's focused terminal (or explains why it
+// can't).
+function openWorkspace(ws) {
+  const terms = (ws.surfaces || []).filter(isTerminal);
+  if ((ws.surfaces || []).length > 0 && !terms.length) return showInfo(ws);
+  const s = terms.find((s) => s.focused) || terms[0];
+  // With no terminal listed (cmux couldn't list the workspace), watch the
+  // workspace itself: cmux reads its focused terminal, and any failure
+  // shows in the banner.
+  select(ws.id, s ? s.id : "");
+  if (!s && ws.error) showBanner(`${ws.title || "Workspace"}: ${ws.error}`, "err");
+}
+
+function rowBadges(row, ws) {
+  if (ws.selected) {
+    const f = document.createElement("span");
+    f.className = "front";
+    f.title = "Frontmost on the Mac";
+    row.append(f);
+  }
+  const n = (ws.surfaces || []).length;
+  if (n > 1) {
+    const b = document.createElement("span");
+    b.className = "badge";
+    b.textContent = n;
+    b.title = `${n} tabs`;
+    row.append(b);
+  }
+  if (ws.error) {
+    const b = document.createElement("span");
+    b.className = "badge warn";
+    b.textContent = "!";
+    row.append(b);
+    row.title = ws.error;
+  }
+}
+
+function workspaceRow(ws) {
+  const terms = (ws.surfaces || []).filter(isTerminal);
+  // Listed, but nothing ray can stream (e.g. only browser tabs).
+  const noTerms = (ws.surfaces || []).length > 0 && terms.length === 0;
+  const row = document.createElement("button");
+  row.className = "row" + (noTerms ? " muted" : "") + (ui.sel?.ws === ws.id ? " active" : "");
+  row.innerHTML = noTerms ? webGlyph : termGlyph;
+  const l = document.createElement("span");
+  l.className = "label";
+  l.textContent = ws.title || `Workspace ${ws.index + 1}`;
+  row.append(l);
+  rowBadges(row, ws);
+  row.onclick = () => openWorkspace(ws);
+  return row;
+}
+
+// groupBlock renders a cmux sidebar group: a header (which is itself a
+// workspace, the anchor, when cmux has one) and its member workspaces.
+function groupBlock(g, anchor, members) {
+  const wrap = document.createElement("div");
+  wrap.className = "group";
+  const collapsed = isCollapsed(g);
+  const head = document.createElement("div");
+  head.className = "group-head" + (anchor && ui.sel?.ws === anchor.id ? " active" : "");
+  const chev = document.createElement("button");
+  chev.className = "chev-btn" + (collapsed ? "" : " open");
+  chev.setAttribute("aria-label", collapsed ? `Expand ${g.name}` : `Collapse ${g.name}`);
+  chev.setAttribute("aria-expanded", String(!collapsed));
+  chev.innerHTML = chevGlyph;
+  chev.onclick = (e) => {
+    e.stopPropagation();
+    setCollapsed(g, !collapsed);
+    renderTree();
+  };
+  const row = document.createElement("button");
+  row.className = "row group-row";
+  row.innerHTML = folderGlyph;
+  const l = document.createElement("span");
+  l.className = "label";
+  l.textContent = g.name || anchor?.title || "Group";
+  row.append(l);
+  if (anchor) rowBadges(row, anchor);
+  // The header opens the anchor's own terminals when it has any (as in
+  // cmux); otherwise it just folds the group.
+  const anchorHasTabs = anchor && (anchor.surfaces || []).length > 0;
+  row.onclick = () => {
+    if (anchorHasTabs) openWorkspace(anchor);
+    else { setCollapsed(g, !collapsed); renderTree(); }
+  };
+  head.append(chev, row);
+  wrap.append(head);
+  if (!collapsed) {
+    const list = document.createElement("div");
+    list.className = "members";
+    for (const ws of members) list.append(workspaceRow(ws));
+    wrap.append(list);
+  }
+  return wrap;
+}
 
 function renderTree() {
   const nav = $("tree");
@@ -436,68 +547,48 @@ function renderTree() {
   label.className = "tree-label";
   label.textContent = "Workspaces";
   nav.append(label);
+  // Keep cmux's order: a group appears where its first workspace does.
+  const done = new Set();
   for (const ws of ui.tree) {
-    const wrap = document.createElement("div");
-    wrap.className = "ws";
-    const terms = (ws.surfaces || []).filter(isTerminal);
-    // Listed, but nothing ray can stream (e.g. only browser tabs).
-    const noTerms = (ws.surfaces || []).length > 0 && terms.length === 0;
-    const row = document.createElement("button");
-    row.className = "row" + (noTerms ? " muted" : "") +
-      (ui.sel?.ws === ws.id && ((ws.surfaces || []).length <= 1 || !ui.sel.sf) ? " active" : "");
-    row.innerHTML = noTerms ? webGlyph : termGlyph;
-    const l = document.createElement("span");
-    l.className = "label";
-    l.textContent = ws.title || `Workspace ${ws.index + 1}`;
-    row.append(l);
-    if (ws.selected) {
-      const f = document.createElement("span");
-      f.className = "front";
-      f.title = "Frontmost on the Mac";
-      row.append(f);
+    const g = ws.group;
+    if (!g) {
+      nav.append(workspaceRow(ws));
+      continue;
     }
-    if ((ws.surfaces || []).length > 1) {
-      const b = document.createElement("span");
-      b.className = "badge";
-      b.textContent = ws.surfaces.length;
-      row.append(b);
-    }
-    if (ws.error) {
-      const b = document.createElement("span");
-      b.className = "badge warn";
-      b.textContent = "!";
-      row.append(b);
-      row.title = ws.error;
-    }
-    row.onclick = () => {
-      if (noTerms) return showInfo(ws);
-      const s = terms.find((s) => s.focused) || terms[0];
-      // With no terminal listed (cmux couldn't list the workspace, or only
-      // non-terminal panels showed up), watch the workspace itself: cmux
-      // reads its focused terminal, and any failure shows in the banner.
-      select(ws.id, s ? s.id : "");
-      if (!s && ws.error) showBanner(`${ws.title || "Workspace"}: ${ws.error}`, "err");
-    };
-    wrap.append(row);
-    if ((ws.surfaces || []).length > 1) {
-      const sub = document.createElement("div");
-      sub.className = "sub";
-      for (const s of ws.surfaces) {
-        const r = document.createElement("button");
-        r.className = "row" + (ui.sel?.ws === ws.id && ui.sel?.sf === s.id ? " active" : "");
-        r.innerHTML = isTerminal(s) ? termGlyph : webGlyph;
-        const sl = document.createElement("span");
-        sl.className = "label";
-        sl.textContent = s.title || (isTerminal(s) ? "terminal" : s.type);
-        r.append(sl);
-        if (isTerminal(s)) r.onclick = () => select(ws.id, s.id);
-        else r.disabled = true;
-        sub.append(r);
-      }
-      wrap.append(sub);
-    }
-    nav.append(wrap);
+    if (done.has(g.id)) continue;
+    done.add(g.id);
+    const inGroup = ui.tree.filter((w) => w.group?.id === g.id);
+    const anchor = inGroup.find((w) => w.group.anchor) || null;
+    nav.append(groupBlock(g, anchor, inGroup.filter((w) => w !== anchor)));
   }
+  renderTabs();
+}
+
+// renderTabs shows the selected workspace's tabs above the terminal, like
+// cmux's tab bar, when it has more than one.
+function renderTabs() {
+  const bar = $("tabs");
+  const ws = ui.tree.find((w) => w.id === ui.sel?.ws);
+  const surfaces = ws?.surfaces || [];
+  bar.textContent = "";
+  bar.hidden = surfaces.length < 2 || !!ui.sel?.info;
+  if (bar.hidden) return;
+  for (const s of surfaces) {
+    const b = document.createElement("button");
+    const term = isTerminal(s);
+    b.className = "tab" + (ui.sel.sf === s.id ? " active" : "");
+    b.innerHTML = term ? termGlyph : webGlyph;
+    const l = document.createElement("span");
+    l.textContent = s.title || (term ? "terminal" : s.type);
+    b.append(l);
+    if (term) b.onclick = () => select(ws.id, s.id);
+    else {
+      b.disabled = true;
+      b.title = "ray can only show terminals";
+    }
+    bar.append(b);
+  }
+  bar.querySelector(".active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 function renderHostMenu() {

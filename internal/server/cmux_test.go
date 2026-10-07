@@ -76,6 +76,11 @@ func fakeCmuxSocket(t *testing.T, nWorkspaces int, withSystemTree bool) string {
 								"panes": []any{map[string]any{"focused": true, "surfaces": []any{surface(i)}}}})
 						}
 						resp["result"] = map[string]any{"windows": []any{map[string]any{"key": false, "workspaces": wss}}}
+					case req.Method == "workspace.group.list":
+						resp["result"] = map[string]any{"groups": []any{map[string]any{
+							"id": "G1", "name": "defects", "is_collapsed": true,
+							"anchor_workspace_id": wsID(1), "member_workspace_ids": []any{wsID(1), wsID(2)},
+						}}}
 					case req.Method == "workspace.list":
 						var wss []any
 						for i := 0; i < nWorkspaces; i++ {
@@ -122,6 +127,15 @@ func TestCmuxTreeUnderRateLimit(t *testing.T) {
 					if ws.Error != "" || len(ws.Surfaces) != 1 {
 						t.Fatalf("round %d: workspace %s: surfaces=%v error=%q", round, ws.Title, ws.Surfaces, ws.Error)
 					}
+				}
+				if g := tree[1].Group; g == nil || g.Name != "defects" || !g.Anchor || !g.Collapsed {
+					t.Errorf("anchor group = %+v", g)
+				}
+				if g := tree[2].Group; g == nil || g.ID != "G1" || g.Anchor {
+					t.Errorf("member group = %+v", g)
+				}
+				if tree[0].Group != nil || tree[3].Group != nil {
+					t.Errorf("ungrouped workspaces got a group")
 				}
 				if !tree[0].Selected {
 					t.Errorf("first workspace should be frontmost when no window is key")
