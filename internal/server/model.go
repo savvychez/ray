@@ -18,6 +18,17 @@ type Workspace struct {
 	Surfaces []Surface `json:"surfaces"`
 	// Error is set when cmux couldn't list this workspace's surfaces.
 	Error string `json:"error,omitempty"`
+	// Group is the cmux sidebar group (folder) this workspace belongs to.
+	Group *GroupRef `json:"group,omitempty"`
+}
+
+// GroupRef places a workspace in a cmux workspace group. A group's header
+// row is itself a workspace (the anchor), which can have its own terminals.
+type GroupRef struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Collapsed bool   `json:"collapsed,omitempty"`
+	Anchor    bool   `json:"anchor,omitempty"` // this workspace is the header
 }
 
 // Surface is a tab/panel inside a workspace.
@@ -82,7 +93,8 @@ func (b *CmuxBackend) Tree(ctx context.Context) ([]Workspace, error) {
 func (b *CmuxBackend) systemTree(ctx context.Context) ([]Workspace, error) {
 	var t struct {
 		Windows []struct {
-			Key        bool `json:"key"`
+			ID         string `json:"id"`
+			Key        bool   `json:"key"`
 			Workspaces []struct {
 				ID       string `json:"id"`
 				Index    int    `json:"index"`
@@ -124,7 +136,53 @@ func (b *CmuxBackend) systemTree(ctx context.Context) ([]Workspace, error) {
 			out = append(out, ws)
 		}
 	}
+	var windowIDs []string
+	for _, win := range t.Windows {
+		windowIDs = append(windowIDs, win.ID)
+	}
+	b.applyGroups(ctx, out, windowIDs)
 	return out, nil
+}
+
+// applyGroups tags workspaces with their sidebar group. Groups are per
+// window. Failures (e.g. a cmux without groups) just leave them ungrouped.
+func (b *CmuxBackend) applyGroups(ctx context.Context, wss []Workspace, windowIDs []string) {
+	byID := map[string]*Workspace{}
+	for i := range wss {
+		byID[wss[i].ID] = &wss[i]
+	}
+	if len(windowIDs) == 0 {
+		windowIDs = []string{""}
+	}
+	for _, win := range windowIDs {
+		params := map[string]any{}
+		if win != "" {
+			params["window_id"] = win
+		}
+		var gl struct {
+			Groups []struct {
+				ID        string   `json:"id"`
+				Name      string   `json:"name"`
+				Collapsed bool     `json:"is_collapsed"`
+				Anchor    string   `json:"anchor_workspace_id"`
+				Members   []string `json:"member_workspace_ids"`
+			} `json:"groups"`
+		}
+		if err := b.call(ctx, "workspace.group.list", params, &gl); err != nil {
+			continue
+		}
+		for _, g := range gl.Groups {
+			members := append([]string{}, g.Members...)
+			if g.Anchor != "" {
+				members = append(members, g.Anchor)
+			}
+			for _, id := range members {
+				if ws := byID[id]; ws != nil {
+					ws.Group = &GroupRef{ID: g.ID, Name: g.Name, Collapsed: g.Collapsed, Anchor: id == g.Anchor}
+				}
+			}
+		}
+	}
 }
 
 // listTree is the pre-system.tree fallback: workspace.list plus one
@@ -149,6 +207,7 @@ func (b *CmuxBackend) listTree(ctx context.Context) ([]Workspace, error) {
 		}
 		ws.Surfaces = sl.Surfaces
 	}
+	b.applyGroups(ctx, wl.Workspaces, nil)
 	return wl.Workspaces, nil
 }
 

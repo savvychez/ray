@@ -48,8 +48,11 @@ lets only processes started inside cmux connect, so you have two options:
 
 ## Using the app
 
-- **Sidebar**: workspaces, with their terminals nested under them. The orange
-  dot marks the workspace in front on the Mac. **+** creates a workspace.
+- **Sidebar**: your cmux workspaces, in cmux's groups (folders). Tap a group
+  header to open its own terminals; the chevron folds it. The orange dot marks
+  the workspace in front on the Mac, and **+** creates a workspace.
+- **Tabs**: a workspace with several tabs shows them in a strip above the
+  terminal, like cmux's tab bar.
 - **Composer, line mode**: type a command or a prompt, then send. ray types the
   text into the terminal and presses Enter.
 - **Composer, live mode**: tap `line` to switch to `live`. Every keystroke goes

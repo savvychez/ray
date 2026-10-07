@@ -333,6 +333,12 @@ func (ss *session) pollScreen(ctx context.Context) {
 	var prev []string
 	var lastErr string
 	var fails int
+	setWatch := func(w watchReq) {
+		cur, prev, lastErr, fails = &w, nil, "", 0
+		if w.ws == "" && w.sf == "" {
+			cur = nil // watch with no target stops streaming
+		}
+	}
 	t := time.NewTimer(time.Hour)
 	defer t.Stop()
 	for {
@@ -340,10 +346,7 @@ func (ss *session) pollScreen(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case w := <-ss.watch:
-			cur, prev, lastErr, fails = &w, nil, "", 0
-			if w.ws == "" && w.sf == "" {
-				cur = nil // watch with no target stops streaming
-			}
+			setWatch(w)
 		case <-ss.poke:
 			// Give the program a moment to react to the input.
 			select {
@@ -352,6 +355,13 @@ func (ss *session) pollScreen(ctx context.Context) {
 			case <-time.After(60 * time.Millisecond):
 			}
 		case <-t.C:
+		}
+		// A timer or poke can win the select over a pending watch change;
+		// apply it first so we never read a surface the client has left.
+		select {
+		case w := <-ss.watch:
+			setWatch(w)
+		default:
 		}
 		if cur == nil {
 			t.Reset(time.Hour)
