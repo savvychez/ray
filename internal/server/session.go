@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/savvychez/ray/internal/cmux"
 )
 
 // ProtocolVersion is bumped on incompatible wire changes.
@@ -328,6 +330,7 @@ func (ss *session) pollScreen(ctx context.Context) {
 	var cur *watchReq
 	var prev []string
 	var lastErr string
+	var fails int
 	t := time.NewTimer(time.Hour)
 	defer t.Stop()
 	for {
@@ -335,7 +338,10 @@ func (ss *session) pollScreen(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case w := <-ss.watch:
-			cur, prev, lastErr = &w, nil, ""
+			cur, prev, lastErr, fails = &w, nil, "", 0
+			if w.ws == "" && w.sf == "" {
+				cur = nil // watch with no target stops streaming
+			}
 		case <-ss.poke:
 			// Give the program a moment to react to the input.
 			select {
@@ -353,12 +359,20 @@ func (ss *session) pollScreen(ctx context.Context) {
 		text, err := ss.srv.Backend.ReadText(cctx, cur.ws, cur.sf, cur.lines)
 		cancel()
 		if err != nil {
-			if err.Error() != lastErr {
+			fails++
+			// cmux's read_text sometimes fails for a moment (internal_error
+			// "Failed to read terminal text", e.g. mid-redraw). Keep showing
+			// the last screen and only report it if it persists.
+			if (!transientReadError(err) || fails >= 4) && err.Error() != lastErr {
 				lastErr = err.Error()
 				ss.send(Msg{T: "notice", WS: cur.ws, SF: cur.sf, Err: lastErr})
 			}
 		} else {
-			lastErr = ""
+			fails = 0
+			if lastErr != "" {
+				lastErr = ""
+				ss.send(Msg{T: "notice", WS: cur.ws, SF: cur.sf}) // clears it
+			}
 			lines := splitLines(text)
 			if prev == nil || !equalLines(prev, lines) {
 				drop, keep := diffLines(prev, lines)
@@ -375,6 +389,16 @@ func (ss *session) pollScreen(ctx context.Context) {
 			t.Reset(slow)
 		}
 	}
+}
+
+// transientReadError reports whether a read failure is worth retrying
+// quietly rather than showing right away.
+func transientReadError(err error) bool {
+	var rerr *cmux.RPCError
+	if errors.As(err, &rerr) {
+		return rerr.Code == "internal_error" || rerr.Code == "rate_limited"
+	}
+	return true // transport hiccup; the next poll redials
 }
 
 func splitLines(s string) []string {

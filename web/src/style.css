@@ -106,6 +106,7 @@ a { color: var(--accent); }
 .sub { padding-left: 18px; }
 .sub .row { min-height: 36px; padding: 7px 10px; font-size: 14px; }
 .row[disabled] { opacity: .45; cursor: default; }
+.row.muted .label { color: var(--muted); }
 .sidebar-foot { padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); font-size: 12px; border-top: 1px solid var(--line); }
 
 .scrim { display: none; }
