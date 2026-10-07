@@ -6,6 +6,7 @@
 //	ray revoke X   unpair a device by name or key
 //	ray addr       print the server's tailcat address
 //	ray tree       print the workspaces and surfaces cmux reports (debugging)
+//	ray version    print the build (git commit) of this binary
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -63,6 +65,8 @@ func main() {
 		err = addr(args)
 	case "tree":
 		err = tree(args)
+	case "version", "-v", "--version":
+		fmt.Println("ray", version())
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -86,6 +90,7 @@ usage:
   ray revoke <name>   unpair a device
   ray addr            print this machine's tailcat address
   ray tree            show what cmux reports for each workspace (debugging)
+  ray version         print this binary's build
 
 run "ray serve -h" for server flags.
 `)
@@ -189,7 +194,8 @@ func serve(args []string) error {
 	host, _ := os.Hostname()
 	host = strings.TrimSuffix(host, ".local")
 	pairing := &server.Pairing{Path: devicesPath()}
-	srv := &server.Server{Backend: backend, Auth: pairing, Hostname: host, DefaultTail: *tail}
+	srv := &server.Server{Backend: backend, Auth: pairing, Hostname: host, Version: version(), DefaultTail: *tail}
+	log.Printf("ray %s", version())
 	ts, region, err := startTailcat(ctx, pk, *derpMapURL, logf, srv, pairing)
 	if err != nil {
 		return err
@@ -405,6 +411,42 @@ func tree(args []string) error {
 		}
 	}
 	return nil
+}
+
+// version identifies this build: the git commit Go embedded at build time
+// (go build/install inside the repo), marked -dirty for uncommitted changes,
+// or the module version for `go install …@version`.
+func version() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	var rev, when string
+	dirty := false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.time":
+			when = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		if v := bi.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+		return "dev"
+	}
+	v := rev[:min(7, len(rev))]
+	if dirty {
+		v += "-dirty"
+	}
+	if t, err := time.Parse(time.RFC3339, when); err == nil {
+		v += " · " + t.Local().Format("Jan 2 15:04")
+	}
+	return v
 }
 
 func envOr(k, def string) string {
