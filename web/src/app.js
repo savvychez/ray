@@ -112,9 +112,34 @@ if (window.visualViewport) {
 }
 window.addEventListener("resize", fitViewport);
 window.addEventListener("orientationchange", () => setTimeout(repaint, 300));
-window.addEventListener("pageshow", repaint);
+window.addEventListener("pageshow", (e) => {
+  // Restored from the back-forward cache: same stale state as a long
+  // background, so start fresh.
+  if (e.persisted) return reloadFresh();
+  repaint();
+});
 window.addEventListener("focus", repaint);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) repaint(); });
+// After a while in the background, iOS can hand the app back unpainted (a
+// black screen until reload), and the tailcat connection is dead by then
+// anyway. So past a short absence, reload instead of trying to recover in
+// place. The selected terminal is remembered; the composer draft is kept.
+const RELOAD_AFTER_HIDDEN_MS = 45 * 1000;
+let hiddenAt = 0;
+function reloadFresh() {
+  try {
+    const draft = document.getElementById("input")?.value;
+    if (draft) sessionStorage.setItem("ray.draft", draft);
+  } catch {}
+  location.reload();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    hiddenAt = Date.now();
+    return;
+  }
+  if (hiddenAt && Date.now() - hiddenAt > RELOAD_AFTER_HIDDEN_MS) return reloadFresh();
+  repaint();
+});
 // The keyboard closing doesn't always fire a viewport resize on iOS.
 document.addEventListener("focusout", () => setTimeout(fitViewport, 50));
 document.addEventListener("focusin", () => setTimeout(fitViewport, 50));
@@ -1042,4 +1067,12 @@ try {
 $("loader").classList.add("done");
 setTimeout(() => $("loader").remove(), 300);
 window.rayReady = true;
+try {
+  const draft = sessionStorage.getItem("ray.draft");
+  if (draft) {
+    sessionStorage.removeItem("ray.draft");
+    inputEl.value = draft;
+    autosize();
+  }
+} catch {}
 switchHost(currentAddr);
