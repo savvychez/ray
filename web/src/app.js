@@ -650,6 +650,35 @@ function onScreen(m) {
 }
 
 termEl.addEventListener("scroll", () => { $("jump-btn").hidden = atBottom(); }, { passive: true });
+
+// No page zoom (iOS ignores user-scalable=no in some modes, so stop its
+// pinch gestures directly). Pinching the terminal resizes its text instead.
+{
+  let startFont = 0;
+  const onTerm = (e) => $("term-wrap").contains(e.target);
+  document.addEventListener("gesturestart", (e) => {
+    e.preventDefault();
+    startFont = onTerm(e) ? prefs.font : 0;
+  }, { passive: false });
+  document.addEventListener("gesturechange", (e) => {
+    e.preventDefault();
+    if (!startFont) return;
+    const f = Math.max(8, Math.min(22, Math.round(startFont * e.scale)));
+    if (f !== prefs.font) {
+      prefs.font = f;
+      applyPrefs();
+    }
+  }, { passive: false });
+  document.addEventListener("gestureend", (e) => {
+    e.preventDefault();
+    if (startFont) savePrefs();
+    startFont = 0;
+  }, { passive: false });
+  // Other browsers: block multi-touch page zoom.
+  document.addEventListener("touchmove", (e) => {
+    if (e.touches.length > 1) e.preventDefault();
+  }, { passive: false });
+}
 $("jump-btn").onclick = () => { termEl.scrollTop = termEl.scrollHeight; };
 
 // ---------- input ----------
