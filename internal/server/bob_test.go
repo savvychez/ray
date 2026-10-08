@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -115,5 +116,29 @@ func TestBobChat(t *testing.T) {
 	f = next(func(m Msg) bool { return isChat(m) && m.Chat.State == bob.StateIdle }).Chat
 	if f.Reset || f.Approval != nil || len(f.Msgs) == 0 || f.Msgs[len(f.Msgs)-1].Text != "It's macOS." {
 		t.Fatalf("final frame = %+v", f)
+	}
+
+	// bob 2.0.5 only draws its permission menu; nothing in the store.
+	addMsg("assistant", `{"role":"assistant","content":"","toolCalls":[{"id":"c2","name":"execute_command","arguments":{"command":"date"}}]}`)
+	menu := "────────────────────\nExecute Command\n────────────────────\nCommand: date\n%s Approve Once\n%s Always Allow Command for task\n%s Reject\n↑↓ (1/3)\nPress Enter to confirm"
+	fb.SetScreen(ws, sf, fmt.Sprintf(menu, "→", " ", " "))
+	f = next(func(m Msg) bool { return isChat(m) && m.Chat.State == bob.StateApproval }).Chat
+	if f.Approval == nil || f.Approval.Prompt == nil || f.Approval.Prompt.Title != "Execute Command" || f.Approval.Call == nil || f.Approval.Call.ID != "c2" {
+		t.Fatalf("screen approval frame = %+v", f.Approval)
+	}
+	// Someone moved the cursor to Reject at the laptop: "always" goes up one.
+	fb.SetScreen(ws, sf, fmt.Sprintf(menu, " ", " ", "→"))
+	mu.Lock()
+	keys = nil
+	mu.Unlock()
+	send(Msg{T: "approve", ID: 7, WS: ws, SF: sf, Data: "always"})
+	if a := next(func(m Msg) bool { return m.T == "ack" && m.ID == 7 }); a.Err != "" {
+		t.Fatalf("approve from screen: %+v", a)
+	}
+	mu.Lock()
+	got = strings.Join(keys, ",")
+	mu.Unlock()
+	if got != "up,enter" {
+		t.Fatalf("always keys = %q", got)
 	}
 }

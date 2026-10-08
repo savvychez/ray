@@ -382,16 +382,20 @@ func (ss *session) pollScreen(ctx context.Context) {
 			t.Reset(time.Hour)
 			continue
 		}
-		// A bob terminal also streams its session as chat (at most ~2/s).
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		text, err := ss.srv.Backend.ReadText(cctx, cur.ws, cur.sf, cur.lines)
+		cancel()
+		// A bob terminal also streams its session as chat (at most ~2/s),
+		// with permission prompts read off the screen.
 		if ss.srv.Bob != nil && time.Since(chat.last) > 400*time.Millisecond {
 			chat.last = time.Now()
+			if err == nil {
+				chat.screen(cur.sf, text)
+			}
 			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			ss.srv.Bob.poll(cctx, cur.ws, cur.sf, &chat, ss.send)
 			cancel()
 		}
-		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		text, err := ss.srv.Backend.ReadText(cctx, cur.ws, cur.sf, cur.lines)
-		cancel()
 		if err != nil {
 			fails++
 			// cmux's read_text sometimes fails for a moment (internal_error
