@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -107,7 +108,15 @@ func (w *BobWatcher) poll(ctx context.Context, ws, sf string, cs *chatState, sen
 		return
 	}
 	if task == nil {
-		fail(fmt.Errorf("no bob session found for %s yet", dir))
+		msg := "no bob session found for " + dir + " yet"
+		if recent, _ := w.Store.RecentTasks(ctx, 3); len(recent) > 0 {
+			var dirs []string
+			for _, t := range recent {
+				dirs = append(dirs, t.Directory)
+			}
+			msg += "; bob's latest sessions are in " + strings.Join(dirs, ", ")
+		}
+		fail(errors.New(msg))
 		return
 	}
 	cs.errSent = ""
