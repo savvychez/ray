@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,35 +17,47 @@ type BobWatcher struct {
 	Store  *bob.Store
 	Detect bob.Detector
 
-	mu   sync.Mutex
-	dirs map[string]string // surface id → directory bob runs in
+	mu      sync.Mutex
+	procs   map[string]bob.Proc // surface id → the bob running there
+	claimed map[string]bool     // task ids bob processes were started with (-r)
 }
 
 // Annotate marks surfaces whose terminal is running bob (Surface.Bob).
 func (w *BobWatcher) Annotate(ctx context.Context, wss []Workspace) {
-	dirs := map[string]string{}
+	procs := map[string]bob.Proc{}
+	claimed := map[string]bool{}
 	for i := range wss {
 		for j := range wss[i].Surfaces {
 			s := &wss[i].Surfaces[j]
 			if s.Type != "" && s.Type != "terminal" {
 				continue
 			}
-			if dir, ok := w.Detect.Lookup(ctx, s.ID, s.TTY); ok {
+			if p, ok := w.Detect.Lookup(ctx, s.ID, s.TTY); ok {
 				s.Bob = true
-				dirs[s.ID] = dir
+				procs[s.ID] = p
+				if p.Resume != "" {
+					claimed[p.Resume] = true
+				}
 			}
 		}
 	}
 	w.mu.Lock()
-	w.dirs = dirs
+	w.procs, w.claimed = procs, claimed
 	w.mu.Unlock()
 }
 
-func (w *BobWatcher) dir(surfaceID string) (string, bool) {
+// task finds the bob session running in terminal sf; ok is false if sf
+// isn't running bob.
+func (w *BobWatcher) task(ctx context.Context, sf string) (task *bob.Task, ok bool, err error) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	d, ok := w.dirs[surfaceID]
-	return d, ok
+	p, ok := w.procs[sf]
+	claimed := w.claimed
+	w.mu.Unlock()
+	if !ok {
+		return nil, false, nil
+	}
+	task, err = w.Store.TaskFor(ctx, p, claimed)
+	return task, true, err
 }
 
 // ChatFrame is the payload of a "chat" message: a bob session as chat.
@@ -88,7 +99,7 @@ func (w *BobWatcher) poll(ctx context.Context, ws, sf string, cs *chatState, sen
 	if cs.surface != sf {
 		*cs = chatState{surface: sf}
 	}
-	dir, ok := w.dir(sf)
+	task, ok, err := w.task(ctx, sf)
 	if !ok {
 		return // not a bob terminal (or no longer)
 	}
@@ -102,21 +113,12 @@ func (w *BobWatcher) poll(ctx context.Context, ws, sf string, cs *chatState, sen
 			send(Msg{T: "chat", WS: ws, SF: sf, Chat: &ChatFrame{Err: msg}})
 		}
 	}
-	task, err := w.Store.TaskFor(ctx, dir)
 	if err != nil {
 		fail(err)
 		return
 	}
 	if task == nil {
-		msg := "no bob session found for " + dir + " yet"
-		if recent, _ := w.Store.RecentTasks(ctx, 3); len(recent) > 0 {
-			var dirs []string
-			for _, t := range recent {
-				dirs = append(dirs, t.Directory)
-			}
-			msg += "; bob's latest sessions are in " + strings.Join(dirs, ", ")
-		}
-		fail(errors.New(msg))
+		fail(errors.New("no bob session here yet; it appears once you send bob a message"))
 		return
 	}
 	cs.errSent = ""
@@ -205,11 +207,10 @@ func (w *BobWatcher) approve(ctx context.Context, b Backend, ws, sf, choice stri
 	if !ok {
 		return fmt.Errorf("unknown choice %q", choice)
 	}
-	dir, ok := w.dir(sf)
+	task, ok, err := w.task(ctx, sf)
 	if !ok {
 		return errors.New("this terminal isn't running bob")
 	}
-	task, err := w.Store.TaskFor(ctx, dir)
 	if err != nil || task == nil {
 		return fmt.Errorf("no bob session: %v", err)
 	}

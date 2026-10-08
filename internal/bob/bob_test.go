@@ -49,11 +49,11 @@ func TestStore(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 
-	task, err := s.TaskFor(ctx, "/w")
+	task, err := s.TaskFor(ctx, Proc{Dir: "/w"}, nil)
 	if err != nil || task == nil || task.ID != "live" || !task.Live {
 		t.Fatalf("TaskFor /w = %+v, %v; want the live task over the more recently updated one", task, err)
 	}
-	if task, _ := s.TaskFor(ctx, "/nowhere"); task != nil {
+	if task, _ := s.TaskFor(ctx, Proc{Dir: "/nowhere"}, nil); task != nil {
 		t.Fatalf("TaskFor /nowhere = %+v", task)
 	}
 
@@ -104,7 +104,7 @@ func TestStore(t *testing.T) {
 
 func TestStoreMissingDB(t *testing.T) {
 	s := &Store{Path: filepath.Join(t.TempDir(), "nope.db")}
-	if _, err := s.TaskFor(context.Background(), "/w"); err != ErrNoDB {
+	if _, err := s.TaskFor(context.Background(), Proc{Dir: "/w"}, nil); err != ErrNoDB {
 		t.Fatalf("err = %v, want ErrNoDB", err)
 	}
 }
@@ -152,13 +152,13 @@ func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {
 }
 
 func TestParsePS(t *testing.T) {
-	out := []byte(`  101 ttys012  -zsh
-  202 ttys012  node /opt/homebrew/bin/bob chat --auto-approve
-  203 ttys012  /opt/homebrew/Cellar/node/22.1/bin/node --max-old-space-size=8192 /opt/homebrew/lib/node_modules/bobshell/dist/bob.js chat
-  303 s013     bob
-  404 ??       node /x/bob.js
-  505 ttys014  python3 scripts/bob-status.py --interval 1
-  606 pts/3    vim bob.txt
+	out := []byte(`  101 ttys012  Thu Oct  8 13:58:01 2026     -zsh
+  202 ttys012  Thu Oct  8 13:58:02 2026     node /opt/homebrew/bin/bob --auto-approve -r c388
+  203 ttys012  Thu Oct  8 13:58:02 2026     /opt/homebrew/Cellar/node/22.1/bin/node --max-old-space-size=8192 /opt/homebrew/lib/node_modules/bobshell/dist/bob.js chat
+  303 s013     Thu Oct  8 09:01:00 2026     bob --resume=abcd
+  404 ??       Wed Oct  7 23:59:59 2026     node /x/bob.js
+  505 ttys014  Thu Oct  8 13:58:01 2026     python3 scripts/bob-status.py --interval 1
+  606 pts/3    Thu Oct  8 13:58:01 2026     vim bob.txt
 `)
 	got := parsePS(out)
 	var pids []string
@@ -169,6 +169,12 @@ func TestParsePS(t *testing.T) {
 	if strings.Join(pids, " ") != want {
 		t.Fatalf("parsePS = %q, want %q", strings.Join(pids, " "), want)
 	}
+	if got[0].Resume != "c388" || got[2].Resume != "abcd" || got[1].Resume != "" {
+		t.Errorf("resume ids: %q %q %q", got[0].Resume, got[1].Resume, got[2].Resume)
+	}
+	if want := time.Date(2026, 10, 8, 13, 58, 2, 0, time.Local); !got[0].Start.Equal(want) {
+		t.Errorf("start = %v, want %v", got[0].Start, want)
+	}
 }
 
 func TestProcDetectorMatching(t *testing.T) {
@@ -178,11 +184,11 @@ func TestProcDetectorMatching(t *testing.T) {
 		{PID: "3", TTY: "ttys020", Dir: ""}, // cwd unknown: ignored
 	}}
 	ctx := context.Background()
-	if dir, ok := d.Lookup(ctx, "ab57-surface-0000-0000-000000000000", ""); !ok || dir != "/w/env" {
-		t.Errorf("by surface env: %q %v", dir, ok)
+	if p, ok := d.Lookup(ctx, "ab57-surface-0000-0000-000000000000", ""); !ok || p.Dir != "/w/env" {
+		t.Errorf("by surface env: %q %v", p.Dir, ok)
 	}
-	if dir, ok := d.Lookup(ctx, "other", "/dev/ttys013"); !ok || dir != "/w/tty" {
-		t.Errorf("by tty (short ps form): %q %v", dir, ok)
+	if p, ok := d.Lookup(ctx, "other", "/dev/ttys013"); !ok || p.Dir != "/w/tty" {
+		t.Errorf("by tty (short ps form): %q %v", p.Dir, ok)
 	}
 	if _, ok := d.Lookup(ctx, "other", "ttys020"); ok {
 		t.Errorf("process without a cwd matched")
@@ -226,12 +232,53 @@ func TestTaskForRelatedDirs(t *testing.T) {
 		root + "/":         "proj", // exact beats the newer subfolder task
 		filepath.Dir(root): "proj", // above both; newest wins, "/" never does
 	} {
-		task, err := s.TaskFor(ctx, dir)
+		task, err := s.TaskFor(ctx, Proc{Dir: dir}, nil)
 		if err != nil || task == nil || task.ID != want {
 			t.Errorf("TaskFor(%s) = %+v, %v; want %s", dir, task, err, want)
 		}
 	}
-	if task, _ := s.TaskFor(ctx, "/elsewhere"); task != nil {
+	if task, _ := s.TaskFor(ctx, Proc{Dir: "/elsewhere"}, nil); task != nil {
 		t.Errorf("unrelated dir matched %+v", task)
+	}
+}
+
+// bob 2.0.5 leaves tasks.directory empty: match by -r id, then by when the
+// process started.
+func TestTaskForWithoutDirectories(t *testing.T) {
+	path, db := Fixture(t)
+	t0 := time.Date(2026, 10, 8, 13, 0, 0, 0, time.UTC)
+	ms := func(min int) int64 { return t0.Add(time.Duration(min) * time.Minute).UnixMilli() }
+	mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at)
+		VALUES ('old', 'p', 'old', 'active', '', ?, ?),
+		       ('resumed', 'p', 'resumed', 'active', '', ?, ?),
+		       ('fresh', 'p', 'fresh', 'active', '', ?, ?)`,
+		ms(0), ms(1), ms(2), ms(30), ms(25), ms(26))
+	s := &Store{Path: path}
+	defer s.Close()
+	ctx := context.Background()
+	claimed := map[string]bool{"resumed": true}
+	for _, c := range []struct {
+		name string
+		p    Proc
+		want string
+	}{
+		{"started with -r", Proc{Dir: "/a", Resume: "resumed", Start: t0.Add(20 * time.Minute)}, "resumed"},
+		{"created after start", Proc{Dir: "/b", Start: t0.Add(20 * time.Minute)}, "fresh"},
+		{"another bob's -r task isn't ours", Proc{Dir: "/b", Start: t0.Add(28 * time.Minute)}, ""},
+		{"nothing since start", Proc{Dir: "/b", Start: t0.Add(40 * time.Minute)}, ""},
+		{"no start time", Proc{Dir: "/b"}, ""},
+	} {
+		task, err := s.TaskFor(ctx, c.p, claimed)
+		got := ""
+		if task != nil {
+			got = task.ID
+		}
+		if err != nil || got != c.want {
+			t.Errorf("%s: got %q, %v; want %q", c.name, got, err, c.want)
+		}
+	}
+	// Without the claim, a task touched after start counts.
+	if task, _ := s.TaskFor(ctx, Proc{Start: t0.Add(28 * time.Minute)}, nil); task == nil || task.ID != "resumed" {
+		t.Errorf("updated after start: %+v", task)
 	}
 }

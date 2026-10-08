@@ -52,6 +52,7 @@ type Task struct {
 	Directory string  `json:"directory"`
 	Cost      float64 `json:"cost,omitempty"`
 	Live      bool    `json:"live"` // a bob process holds its lease
+	CreatedAt int64   `json:"created_at"`
 	UpdatedAt int64   `json:"updated_at"`
 }
 
@@ -106,26 +107,47 @@ func (s *Store) Close() error {
 	return err
 }
 
-// TaskFor returns the session bob is running (or last ran) in dir. A task
-// recorded for dir itself wins; failing that, one for a folder above or
-// below it (bob may record the project root, or a subfolder). Within
-// either, a task whose lease is live wins, then the most recently updated.
-func (s *Store) TaskFor(ctx context.Context, dir string) (*Task, error) {
+// TaskFor returns the session bob process p is running (or last ran).
+// bob 2.0.5 leaves tasks.directory empty, so in order of preference:
+//
+//  1. the task p was started with (bob -r <id>);
+//  2. a task recorded for p's directory, or a folder above or below it;
+//  3. a task created after p started, then one updated after p started.
+//
+// claimed holds task ids other bob processes were started with, which are
+// theirs, not p's. Within a rank, a task whose lease is live wins, then
+// the most recently updated.
+func (s *Store) TaskFor(ctx context.Context, p Proc, claimed map[string]bool) (*Task, error) {
 	tasks, err := s.recent(ctx, 500)
 	if err != nil {
 		return nil, err
 	}
-	want := cleanDir(dir)
+	want := cleanDir(p.Dir)
+	start := p.Start.Add(-5 * time.Second).UnixMilli() // ps rounds to the second
 	var best *Task
 	bestRank := 0
 	for i := range tasks {
 		t := &tasks[i]
 		rank := 0
-		switch got := cleanDir(t.Directory); {
-		case got == want:
-			rank = 2
-		case got != "" && got != "/" && (within(want, got) || within(got, want)):
-			rank = 1
+		got := cleanDir(t.Directory)
+		switch {
+		case p.Resume != "" && t.ID == p.Resume:
+			rank = 6
+		case p.Resume != "":
+			// started on a specific task: only that one (or what bob moved
+			// on to since, below) is p's.
+		case want != "" && got == want:
+			rank = 5
+		case want != "" && got != "" && got != "/" && (within(want, got) || within(got, want)):
+			rank = 4
+		}
+		if rank == 0 && !p.Start.IsZero() && !claimed[t.ID] && got == "" {
+			switch {
+			case t.CreatedAt >= start:
+				rank = 3
+			case t.UpdatedAt >= start && p.Resume == "":
+				rank = 2
+			}
 		}
 		// tasks come live-first, newest-first, so the first at a rank wins.
 		if rank > bestRank {
@@ -147,7 +169,7 @@ func (s *Store) recent(ctx context.Context, n int) ([]Task, error) {
 	}
 	now := time.Now().UnixMilli()
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, COALESCE(title, ''), COALESCE(status, ''), COALESCE(directory, ''), COALESCE(costs, ''), updated_at,
+		SELECT id, COALESCE(title, ''), COALESCE(status, ''), COALESCE(directory, ''), COALESCE(costs, ''), created_at, updated_at,
 		       (locked_by IS NOT NULL AND COALESCE(lock_lease_until, 0) > ?) AS live
 		FROM tasks
 		WHERE parent_id IS NULL
@@ -161,7 +183,7 @@ func (s *Store) recent(ctx context.Context, n int) ([]Task, error) {
 	for rows.Next() {
 		var t Task
 		var costs string
-		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.Directory, &costs, &t.UpdatedAt, &t.Live); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.Directory, &costs, &t.CreatedAt, &t.UpdatedAt, &t.Live); err != nil {
 			return nil, err
 		}
 		t.Cost = totalCost(costs)

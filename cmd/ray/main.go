@@ -440,7 +440,7 @@ func bobDiag(args []string) error {
 	procs := bob.ScanProcs(ctx)
 	fmt.Printf("bob processes (%d):\n", len(procs))
 	for _, p := range procs {
-		fmt.Printf("  pid %s  tty %q  surface %q\n    cwd  %s\n    args %s\n", p.PID, p.TTY, p.Surface, p.Dir, p.Args)
+		fmt.Printf("  pid %s  tty %q  surface %q  started %s  resume %q\n    cwd  %s\n    args %s\n", p.PID, p.TTY, p.Surface, p.Start.Format("Jan 2 15:04:05"), p.Resume, p.Dir, p.Args)
 	}
 	if len(procs) == 0 {
 		// Show anything bob-like, so a launcher we don't recognize is visible.
@@ -464,7 +464,7 @@ func bobDiag(args []string) error {
 			fmt.Printf("  %v\n", err)
 		}
 		for _, t := range recent {
-			fmt.Printf("  %s live=%-5v %s  %q  dir %q\n", t.ID, t.Live, time.UnixMilli(t.UpdatedAt).Format("Jan 2 15:04"), t.Title, t.Directory)
+			fmt.Printf("  %s live=%-5v created %s updated %s  %q  dir %q\n", t.ID, t.Live, time.UnixMilli(t.CreatedAt).Format("Jan 2 15:04:05"), time.UnixMilli(t.UpdatedAt).Format("Jan 2 15:04:05"), t.Title, t.Directory)
 		}
 	}
 
@@ -478,6 +478,12 @@ func bobDiag(args []string) error {
 		return err
 	}
 	det := &bob.ProcDetector{TTL: time.Hour}
+	claimed := map[string]bool{}
+	for _, p := range det.Procs(ctx) {
+		if p.Resume != "" {
+			claimed[p.Resume] = true
+		}
+	}
 	fmt.Println("\ncmux terminals:")
 	for _, ws := range wss {
 		for _, s := range ws.Surfaces {
@@ -485,18 +491,18 @@ func bobDiag(args []string) error {
 				continue
 			}
 			fmt.Printf("  %s / %s  [%s] tty %q", ws.Title, s.Title, s.ID, s.TTY)
-			dir, ok := det.Lookup(ctx, s.ID, s.TTY)
+			p, ok := det.Lookup(ctx, s.ID, s.TTY)
 			if !ok {
 				fmt.Println()
 				continue
 			}
-			fmt.Printf("\n    → bob in %s", dir)
-			task, err := store.TaskFor(ctx, dir)
+			fmt.Printf("\n    → bob (pid %s) in %s", p.PID, p.Dir)
+			task, err := store.TaskFor(ctx, p, claimed)
 			switch {
 			case err != nil:
 				fmt.Printf("; session: %v\n", err)
 			case task == nil:
-				fmt.Printf("; no session for this directory yet\n")
+				fmt.Printf("; no session yet\n")
 			default:
 				fmt.Printf("; session %s %q live=%v\n", task.ID, task.Title, task.Live)
 			}
