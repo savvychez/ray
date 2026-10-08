@@ -153,21 +153,58 @@ func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {
 
 func TestParsePS(t *testing.T) {
 	out := []byte(`  101 ttys012  -zsh
-  202 ttys012  node /opt/homebrew/bin/bob chat
+  202 ttys012  node /opt/homebrew/bin/bob chat --auto-approve
+  203 ttys012  /opt/homebrew/Cellar/node/22.1/bin/node --max-old-space-size=8192 /opt/homebrew/lib/node_modules/bobshell/dist/bob.js chat
   303 s013     bob
   404 ??       node /x/bob.js
   505 ttys014  python3 scripts/bob-status.py --interval 1
-  606 pts/3    node /usr/lib/node_modules/bobshell/dist/bob.js
+  606 pts/3    vim bob.txt
 `)
-	cwds := map[string]string{"202": "/w/a", "303": "/w/b", "404": "/nope", "606": "/w/c"}
-	m := parsePS(context.Background(), out, func(_ context.Context, pid string) string { return cwds[pid] })
-	want := map[string]string{"ttys012": "/w/a", "s013": "/w/b", "ttys013": "/w/b", "pts/3": "/w/c"}
-	if len(m) != len(want) {
-		t.Fatalf("got %v, want %v", m, want)
+	got := parsePS(out)
+	var pids []string
+	for _, p := range got {
+		pids = append(pids, p.PID+"@"+p.TTY)
 	}
-	for k, v := range want {
-		if m[k] != v {
-			t.Errorf("%s: got %q want %q (all: %v)", k, m[k], v, m)
-		}
+	want := "202@ttys012 203@ttys012 303@s013 404@"
+	if strings.Join(pids, " ") != want {
+		t.Fatalf("parsePS = %q, want %q", strings.Join(pids, " "), want)
+	}
+}
+
+func TestProcDetectorMatching(t *testing.T) {
+	d := &ProcDetector{TTL: time.Hour, at: time.Now(), procs: []Proc{
+		{PID: "1", TTY: "", Dir: "/w/env", Surface: "AB57-SURFACE-0000-0000-000000000000"},
+		{PID: "2", TTY: "s013", Dir: "/w/tty"},
+		{PID: "3", TTY: "ttys020", Dir: ""}, // cwd unknown: ignored
+	}}
+	ctx := context.Background()
+	if dir, ok := d.Lookup(ctx, "ab57-surface-0000-0000-000000000000", ""); !ok || dir != "/w/env" {
+		t.Errorf("by surface env: %q %v", dir, ok)
+	}
+	if dir, ok := d.Lookup(ctx, "other", "/dev/ttys013"); !ok || dir != "/w/tty" {
+		t.Errorf("by tty (short ps form): %q %v", dir, ok)
+	}
+	if _, ok := d.Lookup(ctx, "other", "ttys020"); ok {
+		t.Errorf("process without a cwd matched")
+	}
+	if _, ok := d.Lookup(ctx, "nobody", ""); ok {
+		t.Errorf("unknown surface matched")
+	}
+}
+
+func TestSurfaceEnvRegexp(t *testing.T) {
+	// macOS `ps -E` appends the environment after the command.
+	line := []byte("node /opt/homebrew/bin/bob chat TERM=xterm-ghostty CMUX_WORKSPACE_ID=11111111-2222-3333-4444-555555555555 CMUX_SURFACE_ID=6f11d59d-b987-4475-8730-d05e83b501fe HOME=/Users/x")
+	m := surfaceEnv.FindSubmatch(line)
+	if m == nil || strings.ToUpper(string(m[1])) != "6F11D59D-B987-4475-8730-D05E83B501FE" {
+		t.Fatalf("got %q", m)
+	}
+	// Linux /proc/*/environ is NUL-separated.
+	if surfaceEnv.FindSubmatch([]byte("A=1\x00CMUX_SURFACE_ID=6f11d59d-b987-4475-8730-d05e83b501fe\x00")) == nil {
+		t.Fatal("NUL-separated environ not matched")
+	}
+	// Not a different variable that merely ends in the name.
+	if surfaceEnv.FindSubmatch([]byte("OLD_CMUX_SURFACE_ID=6f11d59d-b987-4475-8730-d05e83b501fe")) != nil {
+		t.Fatal("matched a suffix")
 	}
 }

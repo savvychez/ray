@@ -27,10 +27,10 @@ func (w *BobWatcher) Annotate(ctx context.Context, wss []Workspace) {
 	for i := range wss {
 		for j := range wss[i].Surfaces {
 			s := &wss[i].Surfaces[j]
-			if s.TTY == "" {
+			if s.Type != "" && s.Type != "terminal" {
 				continue
 			}
-			if dir, ok := w.Detect.Lookup(ctx, s.TTY); ok {
+			if dir, ok := w.Detect.Lookup(ctx, s.ID, s.TTY); ok {
 				s.Bob = true
 				dirs[s.ID] = dir
 			}
