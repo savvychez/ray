@@ -459,6 +459,13 @@ func bobDiag(args []string) error {
 		fmt.Printf("\nsession store: %v\n", err)
 	} else {
 		fmt.Printf("\nsession store: %s\n", *bobDB)
+		recent, err := store.RecentTasks(ctx, 8)
+		if err != nil {
+			fmt.Printf("  %v\n", err)
+		}
+		for _, t := range recent {
+			fmt.Printf("  %s live=%-5v %s  %q  dir %q\n", t.ID, t.Live, time.UnixMilli(t.UpdatedAt).Format("Jan 2 15:04"), t.Title, t.Directory)
+		}
 	}
 
 	c, err := cmux.Dial(ctx, *backendMode, *socketPath, *cliPath)

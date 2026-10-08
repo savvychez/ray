@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,31 +106,93 @@ func (s *Store) Close() error {
 	return err
 }
 
-// TaskFor returns the session bob is running (or last ran) in dir:
-// prefer a task whose lease is live, then the most recently updated.
+// TaskFor returns the session bob is running (or last ran) in dir. A task
+// recorded for dir itself wins; failing that, one for a folder above or
+// below it (bob may record the project root, or a subfolder). Within
+// either, a task whose lease is live wins, then the most recently updated.
 func (s *Store) TaskFor(ctx context.Context, dir string) (*Task, error) {
+	tasks, err := s.recent(ctx, 500)
+	if err != nil {
+		return nil, err
+	}
+	want := cleanDir(dir)
+	var best *Task
+	bestRank := 0
+	for i := range tasks {
+		t := &tasks[i]
+		rank := 0
+		switch got := cleanDir(t.Directory); {
+		case got == want:
+			rank = 2
+		case got != "" && got != "/" && (within(want, got) || within(got, want)):
+			rank = 1
+		}
+		// tasks come live-first, newest-first, so the first at a rank wins.
+		if rank > bestRank {
+			best, bestRank = t, rank
+		}
+	}
+	return best, nil
+}
+
+// RecentTasks lists bob's most recent top-level tasks, live ones first.
+func (s *Store) RecentTasks(ctx context.Context, n int) ([]Task, error) {
+	return s.recent(ctx, n)
+}
+
+func (s *Store) recent(ctx context.Context, n int) ([]Task, error) {
 	db, err := s.open()
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UnixMilli()
-	row := db.QueryRowContext(ctx, `
-		SELECT id, title, status, directory, COALESCE(costs, ''), updated_at,
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, COALESCE(title, ''), COALESCE(status, ''), COALESCE(directory, ''), COALESCE(costs, ''), updated_at,
 		       (locked_by IS NOT NULL AND COALESCE(lock_lease_until, 0) > ?) AS live
 		FROM tasks
-		WHERE directory = ? AND parent_id IS NULL
+		WHERE parent_id IS NULL
 		ORDER BY live DESC, updated_at DESC
-		LIMIT 1`, now, dir)
-	var t Task
-	var costs string
-	if err := row.Scan(&t.ID, &t.Title, &t.Status, &t.Directory, &costs, &t.UpdatedAt, &t.Live); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
+		LIMIT ?`, now, n)
+	if err != nil {
 		return nil, err
 	}
-	t.Cost = totalCost(costs)
-	return &t, nil
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		var t Task
+		var costs string
+		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.Directory, &costs, &t.UpdatedAt, &t.Live); err != nil {
+			return nil, err
+		}
+		t.Cost = totalCost(costs)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// cleanDir normalizes a directory for comparison: no trailing slash, and
+// symlinks resolved (macOS reports /private/tmp for /tmp, for instance).
+func cleanDir(d string) string {
+	if d == "" {
+		return ""
+	}
+	if c, ok := cleanDirs.Load(d); ok {
+		return c.(string)
+	}
+	c := filepath.Clean(d)
+	if r, err := filepath.EvalSymlinks(c); err == nil {
+		c = r
+	}
+	cleanDirs.Store(d, c)
+	return c
+}
+
+// cleanDirs caches cleanDir, which runs for every task on every poll.
+var cleanDirs sync.Map
+
+// within reports whether dir is inside parent.
+func within(dir, parent string) bool {
+	return strings.HasPrefix(dir, parent+string(filepath.Separator))
 }
 
 // totalCost pulls a dollar total out of bob's costs JSON, whose exact shape

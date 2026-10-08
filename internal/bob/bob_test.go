@@ -208,3 +208,30 @@ func TestSurfaceEnvRegexp(t *testing.T) {
 		t.Fatal("matched a suffix")
 	}
 }
+
+func TestTaskForRelatedDirs(t *testing.T) {
+	path, db := Fixture(t)
+	root := t.TempDir()
+	mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at)
+		VALUES ('proj', 'p', 'at the root', 'active', ?, 1, 10),
+		       ('sub', 'p', 'in sub', 'active', ?, 2, 5),
+		       ('root', 'p', 'filesystem root', 'active', '/', 3, 99)`, root, root+"/sub/")
+	s := &Store{Path: path}
+	defer s.Close()
+	ctx := context.Background()
+	for dir, want := range map[string]string{
+		root + "/sub":      "sub",  // exact, despite the stored trailing slash
+		root + "/sub/deep": "proj", // related tasks: live first, then newest
+		root + "/other":    "proj", // below the project root
+		root + "/":         "proj", // exact beats the newer subfolder task
+		filepath.Dir(root): "proj", // above both; newest wins, "/" never does
+	} {
+		task, err := s.TaskFor(ctx, dir)
+		if err != nil || task == nil || task.ID != want {
+			t.Errorf("TaskFor(%s) = %+v, %v; want %s", dir, task, err, want)
+		}
+	}
+	if task, _ := s.TaskFor(ctx, "/elsewhere"); task != nil {
+		t.Errorf("unrelated dir matched %+v", task)
+	}
+}
