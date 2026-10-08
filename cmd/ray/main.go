@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
@@ -66,6 +67,8 @@ func main() {
 		err = addr(args)
 	case "tree":
 		err = tree(args)
+	case "bob":
+		err = bobDiag(args)
 	case "version", "-v", "--version":
 		fmt.Println("ray", version())
 	case "-h", "--help", "help":
@@ -91,6 +94,7 @@ usage:
   ray revoke <name>   unpair a device
   ray addr            print this machine's tailcat address
   ray tree            show what cmux reports for each workspace (debugging)
+  ray bob             show how Bob Shell terminals are detected (debugging)
   ray version         print this binary's build
 
 run "ray serve -h" for server flags.
@@ -415,7 +419,80 @@ func tree(args []string) error {
 			fmt.Println("  (no surfaces)")
 		}
 		for _, s := range ws.Surfaces {
-			fmt.Printf("  - %-10s %s  [%s]\n", s.Type, s.Title, s.ID)
+			fmt.Printf("  - %-10s %s  [%s] %s\n", s.Type, s.Title, s.ID, s.TTY)
+		}
+	}
+	return nil
+}
+
+// bobDiag explains bob detection: the bob processes found, the cmux
+// terminals, which of them match, and the session each would show.
+func bobDiag(args []string) error {
+	fs := flag.NewFlagSet("bob", flag.ExitOnError)
+	backendMode := fs.String("backend", "auto", "how to reach cmux: auto, socket, or cli")
+	socketPath := fs.String("socket", cmux.DefaultSocketPath(), "cmux socket path")
+	cliPath := fs.String("cmux", "", "path to the cmux CLI")
+	bobDB := fs.String("bob-db", bob.DefaultPath(), "Bob Shell's session database")
+	fs.Parse(args)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	procs := bob.ScanProcs(ctx)
+	fmt.Printf("bob processes (%d):\n", len(procs))
+	for _, p := range procs {
+		fmt.Printf("  pid %s  tty %q  surface %q\n    cwd  %s\n    args %s\n", p.PID, p.TTY, p.Surface, p.Dir, p.Args)
+	}
+	if len(procs) == 0 {
+		// Show anything bob-like, so a launcher we don't recognize is visible.
+		out, _ := exec.CommandContext(ctx, "ps", "-A", "-ww", "-o", "pid=,tty=,args=").Output()
+		fmt.Println("  none recognized; processes mentioning bob:")
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.Contains(strings.ToLower(line), "bob") && !strings.Contains(line, "ray bob") {
+				fmt.Println("   ", strings.TrimSpace(line))
+			}
+		}
+	}
+
+	store := &bob.Store{Path: *bobDB}
+	defer store.Close()
+	if _, err := os.Stat(*bobDB); err != nil {
+		fmt.Printf("\nsession store: %v\n", err)
+	} else {
+		fmt.Printf("\nsession store: %s\n", *bobDB)
+	}
+
+	c, err := cmux.Dial(ctx, *backendMode, *socketPath, *cliPath)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	wss, err := (&server.CmuxBackend{C: c}).Tree(ctx)
+	if err != nil {
+		return err
+	}
+	det := &bob.ProcDetector{TTL: time.Hour}
+	fmt.Println("\ncmux terminals:")
+	for _, ws := range wss {
+		for _, s := range ws.Surfaces {
+			if s.Type != "" && s.Type != "terminal" {
+				continue
+			}
+			fmt.Printf("  %s / %s  [%s] tty %q", ws.Title, s.Title, s.ID, s.TTY)
+			dir, ok := det.Lookup(ctx, s.ID, s.TTY)
+			if !ok {
+				fmt.Println()
+				continue
+			}
+			fmt.Printf("\n    → bob in %s", dir)
+			task, err := store.TaskFor(ctx, dir)
+			switch {
+			case err != nil:
+				fmt.Printf("; session: %v\n", err)
+			case task == nil:
+				fmt.Printf("; no session for this directory yet\n")
+			default:
+				fmt.Printf("; session %s %q live=%v\n", task.ID, task.Title, task.Live)
+			}
 		}
 	}
 	return nil
