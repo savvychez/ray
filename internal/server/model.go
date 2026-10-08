@@ -38,6 +38,8 @@ type Surface struct {
 	Title   string `json:"title"`
 	Type    string `json:"type,omitempty"`
 	Focused bool   `json:"focused"`
+	TTY     string `json:"tty,omitempty"`
+	Bob     bool   `json:"bob,omitempty"` // running IBM Bob Shell; shown as a chat
 }
 
 // Backend is what a session needs from cmux. It is an interface so the

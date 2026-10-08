@@ -4,6 +4,8 @@
 // Wire protocol: newline-delimited JSON frames over one tailcat TCP
 // stream; see internal/server/session.go.
 
+import { renderChat, statusHTML } from "./bob.js";
+
 const DEFAULT_DERP_MAP = "https://tailcat.dev/derpmap.json";
 
 // Stamped by web/build.sh; unbuilt sources show "dev".
@@ -61,7 +63,7 @@ const store = {
   },
 };
 
-const prefs = Object.assign({ wrap: false, font: 12, live: false }, store.get("prefs", {}));
+const prefs = Object.assign({ wrap: false, font: 12, live: false, bobView: "chat" }, store.get("prefs", {}));
 const savePrefs = () => store.set("prefs", prefs);
 
 let hosts = store.get("hosts", []); // [{addr, name, derp, pair}]
@@ -452,6 +454,7 @@ const ui = {
   tree: [],
   sel: null, // {ws, sf}
   screens: new Map(), // "ws/sf" -> lines
+  chats: new Map(), // "ws/sf" -> bob session {task, state, msgs, approval, error}
   ctrl: false,
 };
 
@@ -463,7 +466,7 @@ function applyPrefs() {
   termEl.classList.toggle("wrap", prefs.wrap);
   $("mode-btn").setAttribute("aria-pressed", String(prefs.live));
   $("mode-btn").textContent = prefs.live ? "live" : "line";
-  inputEl.placeholder = prefs.live ? "Live: keys go straight to the terminal" : "Message terminal…";
+  inputEl.placeholder = prefs.live ? "Live: keys go straight to the terminal" : isBobSel?.() ? "Message bob…" : "Message terminal…";
   $("send-btn").hidden = prefs.live;
   for (const b of $("opts-menu").querySelectorAll("button")) {
     if (b.dataset.act === "wrap") b.setAttribute("aria-checked", String(prefs.wrap));
@@ -511,6 +514,8 @@ function updateTitle() {
 }
 
 const termGlyph = '<svg class="glyph" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 8l2.5 2L6 12M10 12.5h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// A chat bubble with a spark: terminals running IBM Bob Shell.
+const bobGlyph = '<svg class="glyph" viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 4h11a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H9l-3.5 3v-3h-1a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M10 6.6l.8 1.8 1.8.8-1.8.8-.8 1.8-.8-1.8-1.8-.8 1.8-.8z" fill="currentColor"/></svg>';
 const webGlyph = '<svg class="glyph" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3 10h14M10 3c2.5 2.5 2.5 11.5 0 14M10 3c-2.5 2.5-2.5 11.5 0 14" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
 
 const isTerminal = (s) => !s.type || /term/i.test(s.type);
@@ -572,7 +577,7 @@ function workspaceRow(ws) {
   const noTerms = (ws.surfaces || []).length > 0 && terms.length === 0;
   const row = document.createElement("button");
   row.className = "row" + (noTerms ? " muted" : "") + (ui.sel?.ws === ws.id ? " active" : "");
-  row.innerHTML = noTerms ? webGlyph : termGlyph;
+  row.innerHTML = noTerms ? webGlyph : (ws.surfaces || []).some((x) => x.bob) ? bobGlyph : termGlyph;
   const l = document.createElement("span");
   l.className = "label";
   l.textContent = ws.title || `Workspace ${ws.index + 1}`;
@@ -608,6 +613,13 @@ function groupBlock(g, anchor, members) {
   l.textContent = g.name || anchor?.title || "Group";
   row.append(l);
   if (anchor) rowBadges(row, anchor);
+  if (anchor && (anchor.surfaces || []).some((x) => x.bob)) {
+    const m = document.createElement("span");
+    m.className = "bobmark";
+    m.title = "Running bob";
+    m.innerHTML = bobGlyph;
+    row.insertBefore(m, row.querySelector(".label").nextSibling);
+  }
   // The header opens the anchor's own terminals when it has any (as in
   // cmux); otherwise it just folds the group.
   const anchorHasTabs = anchor && (anchor.surfaces || []).length > 0;
@@ -670,7 +682,7 @@ function renderTabs() {
     const b = document.createElement("button");
     const term = isTerminal(s);
     b.className = "tab" + (ui.sel.sf === s.id ? " active" : "");
-    b.innerHTML = term ? termGlyph : webGlyph;
+    b.innerHTML = s.bob ? bobGlyph : term ? termGlyph : webGlyph;
     const l = document.createElement("span");
     l.textContent = s.title || (term ? "terminal" : s.type);
     b.append(l);
@@ -733,6 +745,11 @@ function atBottom() {
 
 function renderScreen() {
   const empty = $("empty");
+  if (!ui.sel || ui.sel.info) {
+    $("bobbar").hidden = true;
+    $("chat").hidden = true;
+    termEl.hidden = false;
+  }
   if (!ui.sel) {
     termEl.textContent = "";
     empty.hidden = false;
@@ -748,6 +765,18 @@ function renderScreen() {
     $("jump-btn").hidden = true;
     return;
   }
+  const bobOn = isBobSel();
+  $("bobbar").hidden = !bobOn;
+  if (!prefs.live) inputEl.placeholder = bobOn ? "Message bob…" : "Message terminal…";
+  const chatOn = bobOn && prefs.bobView === "chat";
+  $("chat").hidden = !chatOn;
+  termEl.hidden = chatOn;
+  if (bobOn) renderBobBar();
+  if (chatOn) {
+    empty.hidden = true;
+    renderBob();
+    return;
+  }
   const lines = ui.screens.get(key(ui.sel.ws, ui.sel.sf));
   empty.hidden = !!lines;
   if (!lines) {
@@ -761,6 +790,85 @@ function renderScreen() {
   if (stick) termEl.scrollTop = termEl.scrollHeight;
   $("jump-btn").hidden = atBottom();
 }
+
+// ---------- bob chat ----------
+
+function selSurface() {
+  const ws = ui.tree.find((w) => w.id === ui.sel?.ws);
+  return ws?.surfaces?.find((x) => x.id === ui.sel?.sf) || null;
+}
+
+// isBobSel: the selected terminal is running IBM Bob Shell.
+function isBobSel() {
+  return !!(ui.sel && !ui.sel.info && selSurface()?.bob);
+}
+
+function onChat(m) {
+  const k = key(m.ws, m.sf);
+  const f = m.chat || {};
+  const c = ui.chats.get(k) || { msgs: [] };
+  if (f.error) {
+    c.error = f.error;
+  } else {
+    c.error = null;
+    if (f.reset) c.msgs = [];
+    const last = c.msgs.length ? c.msgs[c.msgs.length - 1].seq : -1;
+    for (const x of f.msgs || []) if (x.seq > last) c.msgs.push(x);
+    if (c.msgs.length > 400) c.msgs = c.msgs.slice(-400);
+    c.task = f.task || c.task;
+    c.state = f.state || c.state;
+    c.approval = f.approval || null;
+  }
+  ui.chats.set(k, c);
+  if (ui.sel && k === key(ui.sel.ws, ui.sel.sf)) {
+    if (isBobSel()) renderBobBar();
+    if (isBobSel() && prefs.bobView === "chat") renderBob();
+  }
+}
+
+function renderBobBar() {
+  $("bob-status").innerHTML = statusHTML(ui.chats.get(key(ui.sel.ws, ui.sel.sf)));
+  for (const b of $("bob-view").querySelectorAll("button")) b.classList.toggle("on", b.dataset.view === prefs.bobView);
+}
+
+function renderBob() {
+  const el = $("chat");
+  const chat = ui.chats.get(key(ui.sel.ws, ui.sel.sf));
+  // Follow new output when already at the bottom, and always bring a new
+  // approval prompt into view.
+  const approval = chat?.approval?.request_id || "";
+  const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 60 || el.dataset.fresh !== "0" || (approval && approval !== el.dataset.approval);
+  el.dataset.approval = approval;
+  renderChat(el, chat);
+  el.dataset.fresh = "0";
+  if (stick) el.scrollTop = el.scrollHeight;
+}
+
+$("bob-view").addEventListener("click", (e) => {
+  const v = e.target.closest("button")?.dataset.view;
+  if (!v) return;
+  prefs.bobView = v;
+  savePrefs();
+  applyPrefs();
+  $("chat").dataset.fresh = "1";
+  termEl.dataset.fresh = "1";
+  renderScreen();
+});
+
+$("chat").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-approve]");
+  if (!b || !ui.sel) return;
+  haptic();
+  const buttons = $("chat").querySelectorAll("button[data-approve]");
+  buttons.forEach((x) => { x.disabled = true; });
+  b.textContent = "Sending…";
+  try {
+    await ui.link?.request({ t: "approve", ws: ui.sel.ws, sf: ui.sel.sf, data: b.dataset.approve });
+  } catch (err) {
+    showBanner("Couldn't answer bob: " + err.message, "err");
+    buttons.forEach((x) => { x.disabled = false; });
+  }
+});
 
 // showInfo selects a workspace that has no terminal to stream and says so
 // in the main pane, instead of asking cmux to read a browser tab.
@@ -783,6 +891,7 @@ function clearErrorBanner() {
 
 function select(ws, sf) {
   ui.sel = { ws, sf };
+  $("chat").dataset.fresh = "1";
   clearErrorBanner();
   store.set("sel." + currentAddr, ui.sel);
   termEl.dataset.fresh = "1";
@@ -913,6 +1022,7 @@ $("input-form").addEventListener("submit", (e) => {
 });
 
 function submitLine() {
+  $("chat").dataset.fresh = "1"; // jump to the bottom to follow the reply
   const text = inputEl.value;
   if (text) sendText(text);
   sendKey("enter");
@@ -1117,6 +1227,7 @@ function switchHost(addr) {
       if (m.t === "tree") onTree(m.workspaces);
       else if (m.t === "screen") onScreen(m);
       else if (m.t === "notice") onNotice(m);
+      else if (m.t === "chat") onChat(m);
     },
     onNotice: (t) => showBanner(t, "err"),
   });

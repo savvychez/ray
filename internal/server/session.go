@@ -29,6 +29,7 @@ const ProtocolVersion = 1
 //	text   {ws, sf, data}          type text into a surface
 //	key    {ws, sf, key}           press a named key (enter, tab, escape, up, …)
 //	focus  {ws, sf}                bring a workspace/surface to front on the Mac
+//	approve {ws, sf, data}         answer bob's permission prompt: once|always|reject
 //	new    {}                      create a workspace
 //	ping   {}
 //
@@ -39,6 +40,7 @@ const ProtocolVersion = 1
 //	screen  {ws, sf, drop, keep, lines}
 //	                               drop the first `drop` lines, keep the next
 //	                               `keep`, discard the rest, append `lines`
+//	chat    {ws, sf, chat}         a bob session as chat (for watched bob terminals)
 //	ack     {id, error?}           reply to any client frame that carried an id
 //	error   {code, error}          fatal; the server closes the stream after it
 //	pong    {}
@@ -67,6 +69,7 @@ type Msg struct {
 	Drop       int         `json:"drop,omitempty"`
 	Keep       *int        `json:"keep,omitempty"`
 	Workspaces []Workspace `json:"workspaces,omitempty"`
+	Chat       *ChatFrame  `json:"chat,omitempty"`
 }
 
 // Authorizer decides whether a connecting peer may use the server.
@@ -80,7 +83,8 @@ type Server struct {
 	Backend  Backend
 	Auth     Authorizer
 	Hostname string
-	Version  string // ray build, reported to clients
+	Version  string      // ray build, reported to clients
+	Bob      *BobWatcher // nil disables the bob chat view
 	Logf     func(format string, args ...any)
 
 	// Poll intervals; zero values use defaults.
@@ -272,6 +276,13 @@ func (ss *session) handle(ctx context.Context, m Msg) {
 	case "new":
 		_, err = b.NewWorkspace(cctx)
 		ss.markActive()
+	case "approve":
+		if ss.srv.Bob == nil {
+			err = errors.New("bob support is off")
+		} else {
+			err = ss.srv.Bob.approve(cctx, b, m.WS, m.SF, m.Data)
+		}
+		ss.markActive()
 	default:
 		err = errors.New("unknown message type " + m.T)
 	}
@@ -307,6 +318,9 @@ func (ss *session) pollTree(ctx context.Context) {
 		}
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		tree, err := ss.srv.Backend.Tree(cctx)
+		if err == nil && ss.srv.Bob != nil {
+			ss.srv.Bob.Annotate(cctx, tree)
+		}
 		cancel()
 		if err != nil {
 			if err.Error() != lastErr {
@@ -333,6 +347,7 @@ func (ss *session) pollScreen(ctx context.Context) {
 	var prev []string
 	var lastErr string
 	var fails int
+	var chat chatState
 	setWatch := func(w watchReq) {
 		cur, prev, lastErr, fails = &w, nil, "", 0
 		if w.ws == "" && w.sf == "" {
@@ -366,6 +381,13 @@ func (ss *session) pollScreen(ctx context.Context) {
 		if cur == nil {
 			t.Reset(time.Hour)
 			continue
+		}
+		// A bob terminal also streams its session as chat (at most ~2/s).
+		if ss.srv.Bob != nil && time.Since(chat.last) > 400*time.Millisecond {
+			chat.last = time.Now()
+			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			ss.srv.Bob.poll(cctx, cur.ws, cur.sf, &chat, ss.send)
+			cancel()
 		}
 		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		text, err := ss.srv.Backend.ReadText(cctx, cur.ws, cur.sf, cur.lines)

@@ -82,8 +82,17 @@
       </div>
     </section>
 
+    <div id="bobbar" class="bobbar" hidden>
+      <div id="bob-status" class="bob-status"></div>
+      <div id="bob-view" class="seg" role="group" aria-label="View">
+        <button data-view="chat">Chat</button>
+        <button data-view="term">Terminal</button>
+      </div>
+    </div>
+
     <section id="term-wrap" class="term-wrap">
       <pre id="term" class="term" tabindex="0" aria-live="off"></pre>
+      <div id="chat" class="chat" hidden></div>
       <button id="jump-btn" class="jump" hidden aria-label="Jump to bottom">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v11M5 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>

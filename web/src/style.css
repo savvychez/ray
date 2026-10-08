@@ -233,3 +233,71 @@ a { color: var(--accent); }
 .diag-actions { display: flex; gap: 6px; }
 .diag-actions button { padding: 7px 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg-elev); font-size: 14px; }
 .diag-text { flex: 1; margin: 0; overflow: auto; font: 11px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; background: var(--bg-term); color: var(--fg-term); border: 1px solid var(--line); border-radius: 10px; padding: 10px; -webkit-user-select: text; user-select: text; }
+
+/* ---------- bob chat ---------- */
+.bobbar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 0; min-width: 0; }
+.bob-status { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 13px; overflow: hidden; }
+.bob-status .pill { display: inline-flex; align-items: center; gap: 6px; flex: none; padding: 4px 10px; border-radius: 999px; background: var(--bg-elev); border: 1px solid var(--line); white-space: nowrap; }
+.bob-status .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.bob-status .pill.idle .dot { background: var(--ok); }
+.bob-status .pill.approval { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); color: var(--warn); }
+.bob-status .pill.approval .dot { background: var(--warn); }
+.bob-status .pill.err { color: var(--err); white-space: normal; }
+.bob-status .cost { color: var(--muted); font: 12px var(--mono); flex: none; }
+.bob-status .task { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seg { display: flex; flex: none; background: var(--bg-elev); border: 1px solid var(--line); border-radius: 10px; padding: 2px; }
+.seg button { padding: 5px 11px; border-radius: 8px; font-size: 13px; color: var(--muted); }
+.seg button.on { background: var(--sel); color: var(--fg); }
+
+.chat { position: absolute; inset: 0; overflow-y: auto; padding: 14px 12px 18px; display: flex; flex-direction: column; gap: 12px; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; font-size: 15px; line-height: 1.45; }
+.chat-empty { margin: auto; color: var(--muted); text-align: center; padding: 20px; }
+.msg { display: flex; flex-direction: column; gap: 8px; max-width: 100%; }
+.msg.user { align-items: flex-end; }
+.msg.user .bubble { max-width: 85%; background: var(--sel); border-radius: 16px 16px 4px 16px; padding: 9px 13px; white-space: pre-wrap; word-break: break-word; }
+.msg.bob .md { word-break: break-word; }
+.md p { margin: 0 0 8px; }
+.md p:last-child { margin-bottom: 0; }
+.md p.h { font-weight: 650; }
+.md ul, .md ol { margin: 0 0 8px; padding-left: 20px; }
+.md code, .tool code { font: 13px var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
+.md pre.code { margin: 0 0 8px; padding: 10px 12px; background: var(--bg-term); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; font: 12.5px/1.45 var(--mono); }
+.md a { color: var(--accent); }
+.note { align-self: center; font-size: 12px; color: var(--muted); }
+.note.err { color: var(--err); }
+
+.tool { border: 1px solid var(--line); border-radius: 12px; background: var(--bg-elev); overflow: hidden; }
+.tool summary, .tool-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; list-style: none; font-size: 14px; min-width: 0; }
+.tool summary::-webkit-details-marker { display: none; }
+.tool summary svg, .tool-head svg { width: 15px; height: 15px; flex: none; }
+.tool.ok summary svg, .tool.ok .tool-head svg { color: var(--ok); }
+.tool.err summary svg { color: var(--err); }
+.tool.wait summary svg, .tool.wait .tool-head svg { color: var(--warn); }
+.tool summary b { flex: none; font-weight: 600; }
+.tool .gist { min-width: 0; flex: 1; color: var(--muted); font: 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-body { border-top: 1px solid var(--line); padding: 8px 12px 10px; }
+.tool-body pre { margin: 0 0 8px; font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+.tool-body .tl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+.todos { list-style: none; margin: 0; padding: 0 12px 10px; }
+.todos li { display: flex; gap: 9px; align-items: baseline; padding: 3px 0; font-size: 14px; }
+.todos .box { width: 13px; height: 13px; flex: none; border: 1.5px solid var(--muted); border-radius: 4px; position: relative; top: 2px; }
+.todos li.done { color: var(--muted); text-decoration: line-through; }
+.todos li.done .box { background: var(--ok); border-color: var(--ok); }
+.todos li.doing .box { border-color: var(--accent); background: linear-gradient(90deg, var(--accent) 50%, transparent 50%); }
+
+.spin { width: 13px; height: 13px; flex: none; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.typing { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+
+.approval { position: sticky; bottom: 0; margin-top: 4px; background: var(--bg-elev); border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--line)); border-radius: 14px; padding: 12px; box-shadow: var(--shadow); }
+.approval-title { display: flex; align-items: center; gap: 8px; color: var(--warn); }
+.approval-title svg { width: 16px; height: 16px; }
+.approval-title b { color: var(--fg); }
+.approval-gist { margin: 6px 0 2px; font: 12.5px/1.4 var(--mono); color: var(--fg-term); word-break: break-word; max-height: 120px; overflow: auto; }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.approval-actions button { flex: 1 1 auto; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-weight: 600; font-size: 14px; }
+.approval-actions button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.approval-actions button.danger { color: var(--err); }
+.approval-actions button:disabled { opacity: .55; }
+@media (max-width: 560px) { .bob-status .task { display: none; } }
+.bobmark { flex: none; display: grid; place-items: center; color: var(--accent); }
+.bobmark .glyph { width: 16px; height: 16px; color: var(--accent); }
