@@ -292,7 +292,7 @@ a { color: var(--accent); }
 .approval-title { display: flex; align-items: center; gap: 8px; color: var(--warn); }
 .approval-title svg { width: 16px; height: 16px; }
 .approval-title b { color: var(--fg); }
-.approval-gist { margin: 6px 0 2px; font: 12.5px/1.4 var(--mono); color: var(--fg-term); word-break: break-word; max-height: 120px; overflow: auto; }
+.approval-gist { margin: 6px 0 2px; font: 12.5px/1.4 var(--mono); color: var(--fg-term); word-break: break-word; white-space: pre-wrap; max-height: 120px; overflow: auto; }
 .approval-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .approval-actions button { flex: 1 1 auto; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-weight: 600; font-size: 14px; }
 .approval-actions button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }

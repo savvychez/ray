@@ -76,6 +76,7 @@ type ChatApproval struct {
 	RequestID string          `json:"request_id"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 	Call      *bob.Call       `json:"call,omitempty"`
+	Prompt    *bob.Prompt     `json:"prompt,omitempty"` // the menu as bob draws it
 }
 
 // chatState is what a session remembers about the bob chat it streams.
@@ -87,12 +88,21 @@ type chatState struct {
 	sig     string
 	errSent string
 	last    time.Time
+	prompt  *bob.Prompt // permission menu on screen, from the last read
 }
 
 const (
 	chatInitial = 150 // messages sent when a chat opens
 	chatTail    = 40
 )
+
+// screen notes the terminal's latest text, where bob draws its
+// permission prompts.
+func (cs *chatState) screen(sf, text string) {
+	if cs.surface == sf {
+		cs.prompt = bob.ParseScreen(text)
+	}
+}
 
 // poll sends the next chat frame for surface sf, if anything changed.
 func (w *BobWatcher) poll(ctx context.Context, ws, sf string, cs *chatState, send func(Msg) bool) {
@@ -122,6 +132,11 @@ func (w *BobWatcher) poll(ctx context.Context, ws, sf string, cs *chatState, sen
 		return
 	}
 	cs.errSent = ""
+	// The process is running (that's how this terminal was matched), whatever
+	// bob's session lease says; bob 2.0.5 doesn't keep one.
+	t := *task
+	t.Live = true
+	task = &t
 
 	reset := task.ID != cs.taskID
 	after, limit := cs.seq, 500
@@ -152,7 +167,10 @@ func (w *BobWatcher) poll(ctx context.Context, ws, sf string, cs *chatState, sen
 	f := &ChatFrame{Reset: reset, Task: task, State: bob.StateOf(task, cs.tail, apps), Msgs: msgs}
 	if len(apps) > 0 {
 		a := apps[0]
-		f.Approval = &ChatApproval{RequestID: a.RequestID, Payload: bob.TrimPayload(a.Payload), Call: pendingCall(cs.tail)}
+		f.Approval = &ChatApproval{RequestID: a.RequestID, Payload: bob.TrimPayload(a.Payload), Call: pendingCall(cs.tail), Prompt: cs.prompt}
+	} else if cs.prompt != nil {
+		f.State = bob.StateApproval
+		f.Approval = &ChatApproval{RequestID: cs.prompt.Key(), Call: pendingCall(cs.tail), Prompt: cs.prompt}
 	}
 	sig := fmt.Sprint(f.State, task.Title, task.Cost, task.Live, approvalID(f.Approval))
 	if !reset && len(msgs) == 0 && sig == cs.sig {
@@ -163,6 +181,17 @@ func (w *BobWatcher) poll(ctx context.Context, ws, sf string, cs *chatState, sen
 	} else {
 		cs.taskID = "" // dropped: resend everything next time
 	}
+}
+
+// dbApproval reports whether bob's store has a pending approval for the
+// session in terminal sf.
+func (w *BobWatcher) dbApproval(ctx context.Context, sf string) bool {
+	task, _, err := w.task(ctx, sf)
+	if err != nil || task == nil {
+		return false
+	}
+	apps, err := w.Store.Approvals(ctx, task.ID)
+	return err == nil && len(apps) > 0
 }
 
 func approvalID(a *ChatApproval) string {
@@ -189,8 +218,8 @@ func pendingCall(msgs []bob.Msg) *bob.Call {
 	return nil
 }
 
-// approvalKeys are the keystrokes for bob's approval menu, which always
-// opens on "Approve Once", with "Reject" third:
+// approvalKeys are the keystrokes for bob's approval menu, which opens on
+// "Approve Once", with "Reject" third:
 //
 //	→ Approve Once
 //	  Approve … for task / Always Allow … for task
@@ -207,20 +236,28 @@ func (w *BobWatcher) approve(ctx context.Context, b Backend, ws, sf, choice stri
 	if !ok {
 		return fmt.Errorf("unknown choice %q", choice)
 	}
-	task, ok, err := w.task(ctx, sf)
-	if !ok {
+	if _, ok, _ := w.task(ctx, sf); !ok {
 		return errors.New("this terminal isn't running bob")
 	}
-	if err != nil || task == nil {
-		return fmt.Errorf("no bob session: %v", err)
-	}
 	// Only press keys if bob is really waiting; otherwise they'd land in
-	// whatever bob is showing now.
-	apps, err := w.Store.Approvals(ctx, task.ID)
-	if err != nil {
-		return err
-	}
-	if len(apps) == 0 {
+	// whatever bob is showing now. The menu on screen is the surest sign,
+	// and says where its cursor is (someone may have moved it at the
+	// laptop); bob's pending-approvals table is the fallback.
+	text, err := b.ReadText(ctx, ws, sf, 0)
+	if p := bob.ParseScreen(text); err == nil && p != nil {
+		target := p.Index(choice)
+		if target < 0 {
+			return fmt.Errorf("bob's prompt has no %q option", choice)
+		}
+		keys = nil
+		for i := p.Cursor; i < target; i++ {
+			keys = append(keys, "down")
+		}
+		for i := p.Cursor; i > target; i-- {
+			keys = append(keys, "up")
+		}
+		keys = append(keys, "enter")
+	} else if !w.dbApproval(ctx, sf) {
 		return errors.New("bob isn't waiting for an approval anymore")
 	}
 	for i, k := range keys {

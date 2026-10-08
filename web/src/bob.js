@@ -173,12 +173,17 @@ export function renderChat(el, chat) {
   if (chat.state === "working") html.push(`<div class="typing">${icons.run}<span>bob is working…</span></div>`);
   if (chat.approval) {
     const c = chat.approval.call;
+    const p = chat.approval.prompt; // the menu as bob draws it, when read off the screen
+    const title = p?.title || (c ? titleCase(c.name) : "Permission needed");
+    const detail = c ? gist(c) : (p?.detail || []).join("\n");
+    // bob words the middle option per tool ("Always Allow Command for task").
+    const always = (p?.options || []).find((o) => !/^(approve once|reject)/i.test(o)) || "Always for this task";
     html.push(`<div class="approval">
-      <div class="approval-title">${icons.wait}<b>${esc(c ? titleCase(c.name) : "Permission needed")}</b></div>
-      ${c ? `<div class="approval-gist">${esc(gist(c)) || ""}</div>` : ""}
+      <div class="approval-title">${icons.wait}<b>${esc(title)}</b></div>
+      ${detail ? `<div class="approval-gist">${esc(detail)}</div>` : ""}
       <div class="approval-actions">
         <button data-approve="once" class="primary">Approve</button>
-        <button data-approve="always">Always for this task</button>
+        <button data-approve="always">${esc(always)}</button>
         <button data-approve="reject" class="danger">Reject</button>
       </div>
     </div>`);

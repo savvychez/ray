@@ -224,3 +224,14 @@ func (f *FakeBackend) Focus(ctx context.Context, wsID, sfID string) error {
 	}
 	return nil
 }
+
+// SetScreen replaces a terminal's text, for tests that need a program's
+// output on screen.
+func (f *FakeBackend) SetScreen(wsID, sfID, text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, t, err := f.term(wsID, sfID); err == nil {
+		t.lines = strings.Split(text, "\n")
+		t.input = ""
+	}
+}

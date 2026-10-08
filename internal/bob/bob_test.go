@@ -122,6 +122,10 @@ func TestConvertTrimsAndSurvivesJunk(t *testing.T) {
 	if msgs[1].Text != "not json" {
 		t.Errorf("junk row = %+v", msgs[1])
 	}
+	// bob's system prompt isn't part of the conversation.
+	if sys := Convert([]Row{{Seq: 4, Role: "system", Data: `{"role":"system","content":"<role_definition>You are Bob"}`}}); len(sys) != 0 {
+		t.Errorf("system message shown: %+v", sys)
+	}
 	// Content as a list of parts.
 	parts := Convert([]Row{{Seq: 3, Role: "user", Data: `{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image"}]}`}})
 	if parts[0].Text != "hi[image]" {

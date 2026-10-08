@@ -75,6 +75,9 @@ type raw struct {
 func Convert(rows []Row) []Msg {
 	out := make([]Msg, 0, len(rows))
 	for _, r := range rows {
+		if r.Role == "system" || r.Role == "developer" {
+			continue // bob's system prompt: long, and not part of the conversation
+		}
 		m := Msg{Seq: r.Seq, Role: r.Role, Time: r.CreatedAt}
 		var d raw
 		if err := json.Unmarshal([]byte(r.Data), &d); err != nil {
