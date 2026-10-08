@@ -18,7 +18,7 @@ import (
 // which directory. Terminals are identified by cmux surface id, with their
 // tty (when cmux reports one) as a fallback.
 type Detector interface {
-	Lookup(ctx context.Context, surfaceID, tty string) (dir string, ok bool)
+	Lookup(ctx context.Context, surfaceID, tty string) (Proc, bool)
 }
 
 // Proc is a running bob process.
@@ -28,6 +28,8 @@ type Proc struct {
 	Args    string
 	Dir     string // working directory; "" if unknown
 	Surface string // CMUX_SURFACE_ID from its environment, upper-cased
+	Start   time.Time
+	Resume  string // task id from -r/--resume, if bob was started that way
 }
 
 // ProcDetector inspects processes with ps (and lsof on macOS). One `ps`
@@ -42,7 +44,7 @@ type ProcDetector struct {
 	procs []Proc
 }
 
-func (d *ProcDetector) Lookup(ctx context.Context, surfaceID, tty string) (string, bool) {
+func (d *ProcDetector) Lookup(ctx context.Context, surfaceID, tty string) (Proc, bool) {
 	surfaceID = strings.ToUpper(surfaceID)
 	tty = strings.TrimPrefix(tty, "/dev/")
 	procs := d.Procs(ctx)
@@ -50,18 +52,18 @@ func (d *ProcDetector) Lookup(ctx context.Context, surfaceID, tty string) (strin
 	// surest link between a process and its terminal.
 	for _, p := range procs {
 		if p.Dir != "" && surfaceID != "" && p.Surface == surfaceID {
-			return p.Dir, true
+			return p, true
 		}
 	}
 	if tty == "" {
-		return "", false
+		return Proc{}, false
 	}
 	for _, p := range procs {
 		if p.Dir != "" && p.Surface == "" && sameTTY(p.TTY, tty) {
-			return p.Dir, true
+			return p, true
 		}
 	}
-	return "", false
+	return Proc{}, false
 }
 
 // Procs lists running bob processes (cached for TTL).
@@ -90,7 +92,7 @@ func sameTTY(a, b string) bool {
 func ScanProcs(ctx context.Context) []Proc {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ps", "-A", "-ww", "-o", "pid=,tty=,args=").Output()
+	out, err := exec.CommandContext(ctx, "ps", "-A", "-ww", "-o", "pid=,tty=,lstart=,args=").Output()
 	if err != nil {
 		return nil
 	}
@@ -102,23 +104,38 @@ func ScanProcs(ctx context.Context) []Proc {
 	return procs
 }
 
-// parsePS picks bob processes out of `ps -o pid=,tty=,args=` output.
+// parsePS picks bob processes out of `ps -o pid=,tty=,lstart=,args=`
+// output. lstart is five fields, like "Thu Oct  8 13:58:01 2026".
 func parsePS(out []byte) []Proc {
 	var procs []Proc
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
-		if len(f) < 3 || !IsBobCommand(f[2:]) {
+		if len(f) < 8 || !IsBobCommand(f[7:]) {
 			continue
 		}
 		tty := strings.TrimPrefix(f[1], "/dev/")
 		if tty == "?" || tty == "??" {
 			tty = ""
 		}
-		procs = append(procs, Proc{PID: f[0], TTY: tty, Args: strings.Join(f[2:], " ")})
+		start, _ := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.Join(f[2:7], " "), time.Local)
+		procs = append(procs, Proc{PID: f[0], TTY: tty, Args: strings.Join(f[7:], " "), Start: start, Resume: resumeArg(f[8:])})
 	}
 	return procs
+}
+
+// resumeArg is the task id given to bob with -r/--resume, if any.
+func resumeArg(args []string) string {
+	for i, a := range args {
+		switch {
+		case (a == "-r" || a == "--resume") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
+			return args[i+1]
+		case strings.HasPrefix(a, "--resume="):
+			return strings.TrimPrefix(a, "--resume=")
+		}
+	}
+	return ""
 }
 
 // IsBobCommand reports whether argv is bob's CLI: the `bob` launcher, or
@@ -186,10 +203,10 @@ func processSurface(ctx context.Context, pid string) string {
 // demo.
 type StaticDetector map[string]string
 
-func (s StaticDetector) Lookup(ctx context.Context, surfaceID, tty string) (string, bool) {
-	if d, ok := s[surfaceID]; ok {
-		return d, true
+func (s StaticDetector) Lookup(ctx context.Context, surfaceID, tty string) (Proc, bool) {
+	d, ok := s[surfaceID]
+	if !ok {
+		d, ok = s[tty]
 	}
-	d, ok := s[tty]
-	return d, ok
+	return Proc{Dir: d}, ok
 }
