@@ -57,9 +57,11 @@ func startLocalStack(t *testing.T, mux *http.ServeMux) *localStack {
 	pk.Public.RegionID = ci.Region[0].RegionID
 
 	pairing := &server.Pairing{Path: filepath.Join(t.TempDir(), "devices.json")}
+	fb := server.NewFakeBackend()
 	srv := &server.Server{
-		Backend: server.NewFakeBackend(), Auth: pairing, Hostname: "testhost", Version: version(), DefaultTail: 200,
+		Backend: fb, Auth: pairing, Hostname: "testhost", Version: version(), DefaultTail: 200,
 		Logf: t.Logf, ScreenFast: 50 * time.Millisecond, ScreenSlow: 100 * time.Millisecond, TreeEvery: 200 * time.Millisecond,
+		Bob: fakeBob(t, fb),
 	}
 	ts, _, err := startTailcat(ctx, pk, derpMapURL, t.Logf, srv, pairing)
 	if err != nil {

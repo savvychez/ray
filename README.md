@@ -70,6 +70,29 @@ with no colors. The view refreshes about every 250 ms while you're typing and
 every 1.2 s when idle. Only changed lines go over the wire, and scrolling is
 detected so it isn't resent as a full redraw.
 
+### IBM Bob Shell
+
+Terminals running [Bob Shell](https://bob.ibm.com) (`bob` / `bob chat`) get a
+chat view on the phone. They're marked with a chat icon in the sidebar, and a
+**Chat / Terminal** toggle sits above the view.
+
+- **Conversation:** your messages and bob's replies render as chat, with
+  markdown. Tool calls (commands, file edits, searches) are collapsible cards
+  with their results. Bob's todo list shows as a checklist.
+- **Status:** a pill shows *Working…*, *Needs your approval*, *Your turn* or
+  *bob isn't running*, plus the session cost.
+- **Approvals:** when bob asks for permission, the phone shows the request
+  with **Approve / Always for this task / Reject**. ray presses the matching
+  keys in bob's menu, and only if bob is actually waiting on a prompt.
+- **Input:** the composer types into the same terminal, so it's the same
+  session you'd see at your desk.
+
+How it works: `ray serve` finds the `bob` process on each cmux terminal's tty
+(`ps`, `lsof`). It then reads that session from bob's own store,
+`~/.bob/db/bob.db` (SQLite, opened read-only), which bob updates as it goes.
+Turn it off with `ray serve -bob=false`, or point at another database with
+`-bob-db`.
+
 ## Security model
 
 - The tailcat address in the QR code contains the server's WireGuard public key

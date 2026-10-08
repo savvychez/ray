@@ -94,10 +94,13 @@ func (f *flakyBackend) readCount() int {
 
 // pipeSession serves one session over an in-memory pipe and returns a
 // channel of frames from the server.
-func pipeSession(t *testing.T, b Backend) (send func(Msg), frames <-chan Msg) {
+func pipeSession(t *testing.T, b Backend, opts ...func(*Server)) (send func(Msg), frames <-chan Msg) {
 	t.Helper()
 	srvConn, cli := net.Pipe()
 	srv := &Server{Backend: b, Logf: t.Logf, ScreenFast: 20 * time.Millisecond, ScreenSlow: 20 * time.Millisecond, TreeEvery: time.Hour}
+	for _, o := range opts {
+		o(srv)
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

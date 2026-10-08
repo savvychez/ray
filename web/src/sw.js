@@ -7,6 +7,7 @@ const SHELL = [
   "./",
   "index.html",
   "app.js",
+  "bob.js",
   "style.css",
   "wasm_exec.js",
   "manifest.webmanifest",

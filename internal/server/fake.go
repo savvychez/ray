@@ -16,6 +16,10 @@ type FakeBackend struct {
 	mu         sync.Mutex
 	workspaces []*fakeWS
 	n          int
+
+	// OnInput, if set, sees every text and key sent to a surface (kind is
+	// "text" or "key"); tests and the demo use it to simulate programs.
+	OnInput func(surfaceID, kind, value string)
 }
 
 type fakeWS struct {
@@ -60,7 +64,7 @@ func (f *FakeBackend) addSurface(ws *fakeWS, title string) {
 	for i := range ws.Surfaces {
 		ws.Surfaces[i].Focused = false
 	}
-	ws.Surfaces = append(ws.Surfaces, Surface{ID: id, Index: len(ws.Surfaces), Title: title, Type: "terminal", Focused: true})
+	ws.Surfaces = append(ws.Surfaces, Surface{ID: id, Index: len(ws.Surfaces), Title: title, Type: "terminal", Focused: true, TTY: "fake-" + id})
 	ws.terms[id] = &fakeTerm{lines: []string{
 		"ray demo terminal (" + ws.Title + " / " + title + ")",
 		"commands typed here run with sh -c on the server",
@@ -118,6 +122,9 @@ func (f *FakeBackend) ReadText(ctx context.Context, wsID, sfID string, lines int
 }
 
 func (f *FakeBackend) SendText(ctx context.Context, wsID, sfID, text string) error {
+	if f.OnInput != nil {
+		f.OnInput(sfID, "text", text)
+	}
 	for _, r := range text {
 		var err error
 		switch r {
@@ -144,6 +151,9 @@ func (f *FakeBackend) SendText(ctx context.Context, wsID, sfID, text string) err
 }
 
 func (f *FakeBackend) SendKey(ctx context.Context, wsID, sfID, key string) error {
+	if f.OnInput != nil {
+		f.OnInput(sfID, "key", key)
+	}
 	f.mu.Lock()
 	_, t, err := f.term(wsID, sfID)
 	if err != nil {

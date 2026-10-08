@@ -34,6 +34,7 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/logger"
 
+	"github.com/savvychez/ray/internal/bob"
 	"github.com/savvychez/ray/internal/cmux"
 	"github.com/savvychez/ray/internal/server"
 )
@@ -159,6 +160,8 @@ func serve(args []string) error {
 	pairTTL := fs.Duration("pair-ttl", 10*time.Minute, "how long a pairing code stays valid")
 	tail := fs.Int("lines", 400, "scrollback lines streamed per terminal")
 	verbose := fs.Bool("v", false, "verbose tailcat logging")
+	bobOn := fs.Bool("bob", true, "show terminals running IBM Bob Shell as a chat")
+	bobDB := fs.String("bob-db", bob.DefaultPath(), "Bob Shell's session database")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -195,6 +198,11 @@ func serve(args []string) error {
 	host = strings.TrimSuffix(host, ".local")
 	pairing := &server.Pairing{Path: devicesPath()}
 	srv := &server.Server{Backend: backend, Auth: pairing, Hostname: host, Version: version(), DefaultTail: *tail}
+	if *bobOn {
+		store := &bob.Store{Path: *bobDB}
+		defer store.Close()
+		srv.Bob = &server.BobWatcher{Store: store, Detect: &bob.ProcDetector{}}
+	}
 	log.Printf("ray %s", version())
 	ts, region, err := startTailcat(ctx, pk, *derpMapURL, logf, srv, pairing)
 	if err != nil {
