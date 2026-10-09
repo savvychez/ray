@@ -162,6 +162,7 @@ func TestParsePS(t *testing.T) {
   203 ttys012  Thu Oct  8 13:58:02 2026     /opt/homebrew/Cellar/node/22.1/bin/node --max-old-space-size=8192 /opt/homebrew/lib/node_modules/bobshell/dist/bob.js chat
   303 s013     Thu Oct  8 09:01:00 2026     bob --resume=abcd
   404 ??       Wed Oct  7 23:59:59 2026     node /x/bob.js
+  405 ttys020  Thu Oct  8 14:00:00 2026     node /x/bin/bob --auto-approve -r
   505 ttys014  Thu Oct  8 13:58:01 2026     python3 scripts/bob-status.py --interval 1
   606 pts/3    Thu Oct  8 13:58:01 2026     vim bob.txt
 `)
@@ -170,9 +171,12 @@ func TestParsePS(t *testing.T) {
 	for _, p := range got {
 		pids = append(pids, p.PID+"@"+p.TTY)
 	}
-	want := "202@ttys012 203@ttys012 303@s013 404@"
+	want := "202@ttys012 203@ttys012 303@s013 404@ 405@ttys020"
 	if strings.Join(pids, " ") != want {
 		t.Fatalf("parsePS = %q, want %q", strings.Join(pids, " "), want)
+	}
+	if got[4].Resume != "" || !got[4].ResumeLast || got[0].ResumeLast {
+		t.Errorf("bare -r: %+v / %+v", got[4], got[0])
 	}
 	if got[0].Resume != "c388" || got[2].Resume != "abcd" || got[1].Resume != "" {
 		t.Errorf("resume ids: %q %q %q", got[0].Resume, got[1].Resume, got[2].Resume)
@@ -310,5 +314,49 @@ func TestAssignWithoutDirectories(t *testing.T) {
 	}
 	if task, _ := taskFor(ctx, s, Proc{}); task != nil {
 		t.Errorf("no start time matched %+v", task)
+	}
+
+	// bob -r (no id) resumes the latest session nobody else has, not the
+	// empty task it creates as it starts.
+	delete(procs, "r")
+	procs["bobar"] = Proc{Start: day(9, 13, 10, 0), ResumeLast: true}
+	task("empty", day(9, 13, 10, 2), day(9, 13, 10, 2))
+	if got, want := ids(Hints{}), "map[bobar:summaries2 cmux:hello ess:time gpfs:jenkins]"; got != want {
+		t.Errorf("bare -r: %s, want %s", got, want)
+	}
+}
+
+// A bare -r resumes the latest session of the folder bob started in,
+// identified by project: from the projects table, or else from the task
+// bob created as it started.
+func TestAssignResumeLastByFolder(t *testing.T) {
+	path, db := Fixture(t)
+	t0 := time.Date(2026, 10, 9, 13, 0, 0, 0, time.UTC)
+	at := func(min int) int64 { return t0.Add(time.Duration(min) * time.Minute).UnixMilli() }
+	task := func(id, proj string, created, updated int64) {
+		mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at) VALUES (?, ?, ?, 'active', '', ?, ?)`, id, proj, id, created, updated)
+	}
+	task("a-old", "pa", at(-100), at(-90))
+	task("b-old", "pb", at(-80), at(-70))
+	task("a-newest", "pa", at(-60), at(-5)) // most recent overall, other folder
+	task("b-launch", "pb", t0.Add(2*time.Second).UnixMilli(), t0.Add(2*time.Second).UnixMilli())
+	s := &Store{Path: path}
+	defer s.Close()
+	ctx := context.Background()
+	p := Proc{Start: t0, ResumeLast: true, Dir: "/work/b"}
+
+	// By the launch task's project.
+	if got, _ := taskFor(ctx, s, p); got == nil || got.ID != "b-old" {
+		t.Errorf("by launch task: %+v, want b-old", got)
+	}
+	// By the projects table, even with no launch task to go on.
+	mustExec(t, db, `DELETE FROM tasks WHERE id = 'b-launch'`)
+	if got, _ := taskFor(ctx, s, p); got == nil || got.ID != "a-newest" {
+		t.Errorf("no project known: %+v, want the latest session", got)
+	}
+	mustExec(t, db, `CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT)`)
+	mustExec(t, db, `INSERT INTO projects VALUES ('pa', '/work/a'), ('pb', '/work/b/')`)
+	if got, _ := taskFor(ctx, s, p); got == nil || got.ID != "b-old" {
+		t.Errorf("by projects table: %+v, want b-old", got)
 	}
 }

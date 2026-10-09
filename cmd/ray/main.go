@@ -440,7 +440,7 @@ func bobDiag(args []string) error {
 	procs := bob.ScanProcs(ctx)
 	fmt.Printf("bob processes (%d):\n", len(procs))
 	for _, p := range procs {
-		fmt.Printf("  pid %s  tty %q  surface %q  started %s  resume %q\n    cwd  %s\n    args %s\n", p.PID, p.TTY, p.Surface, p.Start.Format("Jan 2 15:04:05"), p.Resume, p.Dir, p.Args)
+		fmt.Printf("  pid %s  tty %q  surface %q  started %s  resume %q last=%v\n    cwd  %s\n    args %s\n", p.PID, p.TTY, p.Surface, p.Start.Format("Jan 2 15:04:05"), p.Resume, p.ResumeLast, p.Dir, p.Args)
 	}
 	if len(procs) == 0 {
 		// Show anything bob-like, so a launcher we don't recognize is visible.
@@ -464,7 +464,7 @@ func bobDiag(args []string) error {
 			fmt.Printf("  %v\n", err)
 		}
 		for _, t := range recent {
-			fmt.Printf("  %s live=%-5v created %s updated %s  %q  dir %q\n", t.ID, t.Live, time.UnixMilli(t.CreatedAt).Format("Jan 2 15:04:05"), time.UnixMilli(t.UpdatedAt).Format("Jan 2 15:04:05"), t.Title, t.Directory)
+			fmt.Printf("  %s live=%-5v project %s created %s updated %s  %q  dir %q\n", t.ID, t.Live, t.ProjectID, time.UnixMilli(t.CreatedAt).Format("Jan 2 15:04:05"), time.UnixMilli(t.UpdatedAt).Format("Jan 2 15:04:05"), t.Title, t.Directory)
 		}
 	}
 
