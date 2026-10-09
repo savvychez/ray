@@ -249,50 +249,66 @@ func TestTaskForRelatedDirs(t *testing.T) {
 
 // taskFor assigns a session to a single bob process.
 func taskFor(ctx context.Context, s *Store, p Proc) (*Task, error) {
-	m, err := s.Assign(ctx, map[string]Proc{"sf": p})
+	m, err := s.Assign(ctx, map[string]Proc{"sf": p}, Hints{})
 	return m["sf"], err
 }
 
-// bob 2.0.5 leaves tasks.directory empty: sessions go to bobs by -r id,
-// then by when each bob started, one terminal per session.
+// bob 2.0.5 leaves tasks.directory empty; this is a real machine's state
+// (from `ray bob`), with three bobs and two sessions made with /new.
 func TestAssignWithoutDirectories(t *testing.T) {
 	path, db := Fixture(t)
-	t0 := time.Date(2026, 10, 8, 13, 0, 0, 0, time.UTC)
-	at := func(min int) time.Time { return t0.Add(time.Duration(min) * time.Minute) }
-	ms := func(min int) int64 { return at(min).UnixMilli() }
-	mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at)
-		VALUES ('old', 'p', 'old', 'active', '', ?, ?),
-		       ('a1', 'p', 'a first', 'active', '', ?, ?),
-		       ('resumed', 'p', 'resumed', 'active', '', ?, ?),
-		       ('b1', 'p', 'b first', 'active', '', ?, ?)`,
-		ms(-60), ms(-59), ms(1), ms(50), ms(-30), ms(55), ms(31), ms(32))
+	day := func(d, h, m, sec int) time.Time { return time.Date(2026, 10, d, h, m, sec, 0, time.Local) }
+	task := func(id string, created, updated time.Time) {
+		mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at) VALUES (?, 'p', ?, 'active', '', ?, ?)`,
+			id, id, created.UnixMilli(), updated.UnixMilli())
+	}
+	task("hello", day(8, 13, 44, 4), day(9, 12, 37, 26))
+	task("jenkins", day(9, 12, 22, 59), day(9, 12, 27, 27))
+	task("summaries2", day(8, 16, 2, 50), day(9, 11, 23, 29))
+	task("summaries1", day(8, 15, 53, 38), day(8, 16, 2, 0))
+	task("time", day(8, 14, 22, 18), day(8, 14, 38, 47))
+	task("cluster", day(7, 14, 10, 52), day(8, 13, 56, 49))
+	task("blank", day(8, 13, 33, 0), day(8, 13, 33, 0))
+	procs := map[string]Proc{
+		"ess":  {Start: day(8, 14, 22, 16)},
+		"gpfs": {Start: day(9, 12, 22, 57)},
+		"cmux": {Start: day(8, 13, 44, 0)},
+	}
 	s := &Store{Path: path}
 	defer s.Close()
-	got, err := s.Assign(context.Background(), map[string]Proc{
-		"A": {Start: at(0)},                     // started 13:00, chatted at 13:01
-		"B": {Start: at(30)},                    // started 13:30, chatted at 13:31
-		"C": {Start: at(40)},                    // started 13:40, nothing yet
-		"R": {Start: at(45), Resume: "resumed"}, // bob -r resumed
-		"X": {Start: at(46), Resume: "missing"}, // -r of a task that's gone: by time
-	})
-	if err != nil {
-		t.Fatal(err)
+	ctx := context.Background()
+	ids := func(h Hints) string {
+		got, err := s.Assign(ctx, procs, h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]string{}
+		for k, v := range got {
+			m[k] = v.ID
+		}
+		return fmt.Sprint(m)
 	}
-	ids := map[string]string{}
-	for k, v := range got {
-		ids[k] = v.ID
+	// Each bob gets the session it created as it started.
+	if got, want := ids(Hints{}), "map[cmux:hello ess:time gpfs:jenkins]"; got != want {
+		t.Errorf("launch tasks: %s, want %s", got, want)
 	}
-	want := map[string]string{"A": "a1", "B": "b1", "R": "resumed"}
-	if fmt.Sprint(ids) != fmt.Sprint(want) {
-		t.Errorf("assigned %v, want %v", ids, want)
+	// A /new session goes to the bob whose screen shows it…
+	mustExec(t, db, `INSERT INTO messages (id, task_id, role, data, created_at) VALUES ('m1', 'summaries2', 'user', '{"role":"user","content":"hi, given this info:\n\nAustin Candidates: lots of names"}', 1)`)
+	screen := "> hi, given this info:\n\n  Austin Candidates: lots\n  of names\n\nworking…"
+	if got, want := ids(Hints{Screens: map[string]string{"ess": screen}}), "map[cmux:hello ess:summaries2 gpfs:jenkins]"; got != want {
+		t.Errorf("by screen: %s, want %s", got, want)
 	}
-
-	// A lone bob that started a new session (/new) moves on to it.
-	mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at) VALUES ('a2', 'p', 'a second', 'active', '', ?, ?)`, ms(60), ms(60))
-	if task, _ := taskFor(context.Background(), s, Proc{Start: at(0)}); task == nil || task.ID != "a2" {
-		t.Errorf("after /new: %+v", task)
+	// …and stays there once it scrolls out of view.
+	if got, want := ids(Hints{Prev: map[string]string{"ess": "summaries2"}}), "map[cmux:hello ess:summaries2 gpfs:jenkins]"; got != want {
+		t.Errorf("sticky: %s, want %s", got, want)
 	}
-	if task, _ := taskFor(context.Background(), s, Proc{}); task != nil {
+	// -r wins; a bob that hasn't started a session shows none.
+	procs["r"] = Proc{Start: day(9, 13, 0, 0), Resume: "cluster"}
+	procs["new"] = Proc{Start: day(9, 13, 5, 0)}
+	if got, want := ids(Hints{}), "map[cmux:hello ess:time gpfs:jenkins r:cluster]"; got != want {
+		t.Errorf("with -r: %s, want %s", got, want)
+	}
+	if task, _ := taskFor(ctx, s, Proc{}); task != nil {
 		t.Errorf("no start time matched %+v", task)
 	}
 }

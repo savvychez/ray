@@ -108,18 +108,32 @@ func (s *Store) Close() error {
 	return err
 }
 
+// Hints sharpen Assign: what each bob terminal shows right now, and what
+// each was assigned before (so a choice doesn't flicker when the evidence
+// scrolls away). Both are keyed by surface id and optional.
+type Hints struct {
+	Screens map[string]string
+	Prev    map[string]string
+}
+
+// launchWindow is how soon after starting bob creates its first task (a
+// couple of seconds in practice).
+const launchWindow = 60 * time.Second
+
 // Assign works out which session each running bob is showing, given the
 // bob processes by cmux surface id. bob 2.0.5 leaves tasks.directory
 // empty and keeps no lease, so in order of preference:
 //
 //  1. the task a bob was started with (bob -r <id>);
 //  2. a task recorded for its directory, or a folder above or below it;
-//  3. by time: newest-started bob first, each takes the newest task created
-//     since it started that no other bob has taken.
+//  3. by time. bob creates a task as it starts, so a task created just after
+//     a bob started is that bob's. Tasks created later (bob's /new) could
+//     belong to any bob started before them; the one whose terminal shows
+//     the task's messages gets it. Without such evidence a bob keeps its
+//     previous task, or else its launch task.
 //
-// Each task goes to at most one terminal, so several bobs never all show
-// the newest session.
-func (s *Store) Assign(ctx context.Context, procs map[string]Proc) (map[string]*Task, error) {
+// Each task goes to at most one terminal.
+func (s *Store) Assign(ctx context.Context, procs map[string]Proc, h Hints) (map[string]*Task, error) {
 	tasks, err := s.recent(ctx, 500)
 	if err != nil {
 		return nil, err
@@ -181,27 +195,101 @@ func (s *Store) Assign(ctx context.Context, procs map[string]Proc) (map[string]*
 			take(sf, best)
 		}
 	}
+
+	// By time. First each bob's launch task: the earliest created just after
+	// it started.
+	open := func(t *Task) bool { return !taken[t.ID] && t.Directory == "" }
+	launch := map[string]*Task{}
 	for _, sf := range keys {
 		p := procs[sf]
 		if out[sf] != nil || p.Start.IsZero() {
 			continue
 		}
-		start := p.Start.Add(-5 * time.Second).UnixMilli() // ps rounds to the second
-		var best *Task
+		from := p.Start.Add(-5 * time.Second).UnixMilli() // ps rounds to the second
+		to := p.Start.Add(launchWindow).UnixMilli()
+		var first *Task
 		for i := range tasks {
 			t := &tasks[i]
-			if taken[t.ID] || t.Directory != "" || t.CreatedAt < start {
-				continue
-			}
-			if best == nil || t.CreatedAt > best.CreatedAt {
-				best = t
+			if open(t) && t.CreatedAt >= from && t.CreatedAt <= to && (first == nil || t.CreatedAt < first.CreatedAt) {
+				first = t
 			}
 		}
-		if best != nil {
-			take(sf, best)
+		if first != nil {
+			launch[sf] = first
+			taken[first.ID] = true
 		}
 	}
+	// Then pick between the launch task and later ones.
+	for _, sf := range keys {
+		p := procs[sf]
+		if out[sf] != nil || p.Start.IsZero() {
+			continue
+		}
+		from := p.Start.Add(-5 * time.Second).UnixMilli()
+		var cands []*Task
+		if l := launch[sf]; l != nil {
+			cands = append(cands, l)
+		}
+		for i := range tasks {
+			if t := &tasks[i]; open(t) && t.CreatedAt >= from && len(cands) < 8 {
+				cands = append(cands, t) // recent first
+			}
+		}
+		if len(cands) == 0 {
+			continue
+		}
+		pick := s.onScreen(ctx, cands, h.Screens[sf])
+		if pick == nil {
+			for _, t := range cands {
+				if t.ID == h.Prev[sf] {
+					pick = t
+				}
+			}
+		}
+		if pick == nil {
+			pick = cands[0]
+		}
+		take(sf, pick)
+	}
 	return out, nil
+}
+
+// onScreen picks the task whose recent messages are on a terminal screen,
+// or nil if none (or no screen).
+func (s *Store) onScreen(ctx context.Context, cands []*Task, screen string) *Task {
+	if screen == "" || len(cands) < 2 {
+		return nil
+	}
+	screen = squash(screen)
+	var best *Task
+	bestScore := 0
+	for _, t := range cands {
+		rows, err := s.Messages(ctx, t.ID, 0, 20)
+		if err != nil {
+			continue
+		}
+		score := 0
+		for _, m := range Convert(rows) {
+			if m.Role != "user" && m.Role != "assistant" {
+				continue
+			}
+			for _, line := range strings.Split(m.Text, "\n") {
+				// A line's start survives the terminal's wrapping.
+				if l := squash(line); len(l) >= 12 && strings.Contains(screen, l[:min(len(l), 40)]) {
+					score++
+				}
+			}
+		}
+		if score > bestScore {
+			best, bestScore = t, score
+		}
+	}
+	return best
+}
+
+// squash collapses runs of whitespace, for comparing text with a screen.
+func squash(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // Task returns one task by id, or nil.
