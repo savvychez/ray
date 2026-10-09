@@ -118,19 +118,22 @@ type Hints struct {
 
 // launchWindow is how soon after starting bob creates its first task (a
 // couple of seconds in practice).
-const launchWindow = 60 * time.Second
+const launchWindow = 20 * time.Second
 
 // Assign works out which session each running bob is showing, given the
 // bob processes by cmux surface id. bob 2.0.5 leaves tasks.directory
 // empty and keeps no lease, so in order of preference:
 //
-//  1. the task a bob was started with (bob -r <id>);
+//  1. the task a bob was started with (bob -r <id>; a bare -r resumes the
+//     latest session, see below);
 //  2. a task recorded for its directory, or a folder above or below it;
 //  3. by time. bob creates a task as it starts, so a task created just after
 //     a bob started is that bob's. Tasks created later (bob's /new) could
 //     belong to any bob started before them; the one whose terminal shows
 //     the task's messages gets it. Without such evidence a bob keeps its
-//     previous task, or else its launch task.
+//     previous task, or else its launch task. A bob started with a bare -r
+//     resumed an older task, so it prefers the most recently updated task
+//     from before it started that no other bob has.
 //
 // Each task goes to at most one terminal.
 func (s *Store) Assign(ctx context.Context, procs map[string]Proc, h Hints) (map[string]*Task, error) {
@@ -227,11 +230,20 @@ func (s *Store) Assign(ctx context.Context, procs map[string]Proc, h Hints) (map
 		}
 		from := p.Start.Add(-5 * time.Second).UnixMilli()
 		var cands []*Task
+		if p.ResumeLast {
+			// bob -r resumed its latest session: one from before it started,
+			// most likely the most recently updated one nobody else has.
+			for i := range tasks {
+				if t := &tasks[i]; open(t) && t.CreatedAt < from && len(cands) < 6 {
+					cands = append(cands, t)
+				}
+			}
+		}
 		if l := launch[sf]; l != nil {
 			cands = append(cands, l)
 		}
 		for i := range tasks {
-			if t := &tasks[i]; open(t) && t.CreatedAt >= from && len(cands) < 8 {
+			if t := &tasks[i]; open(t) && t.CreatedAt >= from && len(cands) < 14 {
 				cands = append(cands, t) // recent first
 			}
 		}

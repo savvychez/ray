@@ -162,6 +162,7 @@ func TestParsePS(t *testing.T) {
   203 ttys012  Thu Oct  8 13:58:02 2026     /opt/homebrew/Cellar/node/22.1/bin/node --max-old-space-size=8192 /opt/homebrew/lib/node_modules/bobshell/dist/bob.js chat
   303 s013     Thu Oct  8 09:01:00 2026     bob --resume=abcd
   404 ??       Wed Oct  7 23:59:59 2026     node /x/bob.js
+  405 ttys020  Thu Oct  8 14:00:00 2026     node /x/bin/bob --auto-approve -r
   505 ttys014  Thu Oct  8 13:58:01 2026     python3 scripts/bob-status.py --interval 1
   606 pts/3    Thu Oct  8 13:58:01 2026     vim bob.txt
 `)
@@ -170,9 +171,12 @@ func TestParsePS(t *testing.T) {
 	for _, p := range got {
 		pids = append(pids, p.PID+"@"+p.TTY)
 	}
-	want := "202@ttys012 203@ttys012 303@s013 404@"
+	want := "202@ttys012 203@ttys012 303@s013 404@ 405@ttys020"
 	if strings.Join(pids, " ") != want {
 		t.Fatalf("parsePS = %q, want %q", strings.Join(pids, " "), want)
+	}
+	if got[4].Resume != "" || !got[4].ResumeLast || got[0].ResumeLast {
+		t.Errorf("bare -r: %+v / %+v", got[4], got[0])
 	}
 	if got[0].Resume != "c388" || got[2].Resume != "abcd" || got[1].Resume != "" {
 		t.Errorf("resume ids: %q %q %q", got[0].Resume, got[1].Resume, got[2].Resume)
@@ -310,5 +314,14 @@ func TestAssignWithoutDirectories(t *testing.T) {
 	}
 	if task, _ := taskFor(ctx, s, Proc{}); task != nil {
 		t.Errorf("no start time matched %+v", task)
+	}
+
+	// bob -r (no id) resumes the latest session nobody else has, not the
+	// empty task it creates as it starts.
+	delete(procs, "r")
+	procs["bobar"] = Proc{Start: day(9, 13, 10, 0), ResumeLast: true}
+	task("empty", day(9, 13, 10, 2), day(9, 13, 10, 2))
+	if got, want := ids(Hints{}), "map[bobar:summaries2 cmux:hello ess:time gpfs:jenkins]"; got != want {
+		t.Errorf("bare -r: %s, want %s", got, want)
 	}
 }

@@ -30,6 +30,9 @@ type Proc struct {
 	Surface string // CMUX_SURFACE_ID from its environment, upper-cased
 	Start   time.Time
 	Resume  string // task id from -r/--resume, if bob was started that way
+	// ResumeLast: started with a bare -r, so bob resumed its most recent
+	// session (whichever that was at Start).
+	ResumeLast bool
 }
 
 // ProcDetector inspects processes with ps (and lsof on macOS). One `ps`
@@ -120,22 +123,30 @@ func parsePS(out []byte) []Proc {
 			tty = ""
 		}
 		start, _ := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.Join(f[2:7], " "), time.Local)
-		procs = append(procs, Proc{PID: f[0], TTY: tty, Args: strings.Join(f[7:], " "), Start: start, Resume: resumeArg(f[8:])})
+		id, last := resumeArg(f[8:])
+		procs = append(procs, Proc{PID: f[0], TTY: tty, Args: strings.Join(f[7:], " "), Start: start, Resume: id, ResumeLast: last})
 	}
 	return procs
 }
 
-// resumeArg is the task id given to bob with -r/--resume, if any.
-func resumeArg(args []string) string {
+// resumeArg reads -r/--resume from bob's args: the task id it names, or
+// last when it names none (bob then resumes its most recent session).
+func resumeArg(args []string) (id string, last bool) {
 	for i, a := range args {
 		switch {
-		case (a == "-r" || a == "--resume") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
-			return args[i+1]
+		case a == "-r" || a == "--resume":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				return args[i+1], false
+			}
+			return "", true
 		case strings.HasPrefix(a, "--resume="):
-			return strings.TrimPrefix(a, "--resume=")
+			if v := strings.TrimPrefix(a, "--resume="); v != "" {
+				return v, false
+			}
+			return "", true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // IsBobCommand reports whether argv is bob's CLI: the `bob` launcher, or
