@@ -17,15 +17,16 @@ type BobWatcher struct {
 	Store  *bob.Store
 	Detect bob.Detector
 
-	mu      sync.Mutex
-	procs   map[string]bob.Proc // surface id → the bob running there
-	claimed map[string]bool     // task ids bob processes were started with (-r)
+	mu        sync.Mutex
+	procs     map[string]bob.Proc // surface id → the bob running there
+	assigned  map[string]string   // surface id → task id it shows
+	assignAt  time.Time
+	assignErr error
 }
 
 // Annotate marks surfaces whose terminal is running bob (Surface.Bob).
 func (w *BobWatcher) Annotate(ctx context.Context, wss []Workspace) {
 	procs := map[string]bob.Proc{}
-	claimed := map[string]bool{}
 	for i := range wss {
 		for j := range wss[i].Surfaces {
 			s := &wss[i].Surfaces[j]
@@ -35,28 +36,42 @@ func (w *BobWatcher) Annotate(ctx context.Context, wss []Workspace) {
 			if p, ok := w.Detect.Lookup(ctx, s.ID, s.TTY); ok {
 				s.Bob = true
 				procs[s.ID] = p
-				if p.Resume != "" {
-					claimed[p.Resume] = true
-				}
 			}
 		}
 	}
 	w.mu.Lock()
-	w.procs, w.claimed = procs, claimed
+	w.procs = procs
+	w.assignAt = time.Time{} // re-assign sessions on next use
 	w.mu.Unlock()
 }
+
+// assignEvery bounds how stale the terminal → session assignment gets; a
+// new session (bob's first message) shows up within this.
+const assignEvery = time.Second
 
 // task finds the bob session running in terminal sf; ok is false if sf
 // isn't running bob.
 func (w *BobWatcher) task(ctx context.Context, sf string) (task *bob.Task, ok bool, err error) {
 	w.mu.Lock()
-	p, ok := w.procs[sf]
-	claimed := w.claimed
-	w.mu.Unlock()
-	if !ok {
+	defer w.mu.Unlock()
+	if _, ok := w.procs[sf]; !ok {
 		return nil, false, nil
 	}
-	task, err = w.Store.TaskFor(ctx, p, claimed)
+	if time.Since(w.assignAt) > assignEvery {
+		got, err := w.Store.Assign(ctx, w.procs)
+		w.assigned, w.assignErr, w.assignAt = map[string]string{}, err, time.Now()
+		for k, t := range got {
+			w.assigned[k] = t.ID
+		}
+	}
+	if w.assignErr != nil {
+		return nil, true, w.assignErr
+	}
+	id := w.assigned[sf]
+	if id == "" {
+		return nil, true, nil
+	}
+	task, err = w.Store.Task(ctx, id)
 	return task, true, err
 }
 

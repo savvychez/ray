@@ -133,7 +133,14 @@ type session struct {
 
 	mu     sync.Mutex
 	active time.Time // last input
+
+	lastText time.Time // when text was last typed; handle's goroutine only
 }
+
+// enterGap separates typed text from the Enter that submits it. Programs
+// with rich line editors (bob's Ink UI) read text and Enter arriving
+// together as a paste, and insert a newline instead of submitting.
+const enterGap = 120 * time.Millisecond
 
 func (ss *session) send(m Msg) bool {
 	select {
@@ -266,8 +273,14 @@ func (ss *session) handle(ctx context.Context, m Msg) {
 		ss.markActive()
 	case "text":
 		err = b.SendText(cctx, m.WS, m.SF, m.Data)
+		ss.lastText = time.Now()
 		ss.markActive()
 	case "key":
+		if m.Key == "enter" {
+			if wait := enterGap - time.Since(ss.lastText); wait > 0 {
+				time.Sleep(wait)
+			}
+		}
 		err = b.SendKey(cctx, m.WS, m.SF, m.Key)
 		ss.markActive()
 	case "focus":
