@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,11 +50,11 @@ func TestStore(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 
-	task, err := s.TaskFor(ctx, Proc{Dir: "/w"}, nil)
+	task, err := taskFor(ctx, s, Proc{Dir: "/w"})
 	if err != nil || task == nil || task.ID != "live" || !task.Live {
 		t.Fatalf("TaskFor /w = %+v, %v; want the live task over the more recently updated one", task, err)
 	}
-	if task, _ := s.TaskFor(ctx, Proc{Dir: "/nowhere"}, nil); task != nil {
+	if task, _ := taskFor(ctx, s, Proc{Dir: "/nowhere"}); task != nil {
 		t.Fatalf("TaskFor /nowhere = %+v", task)
 	}
 
@@ -104,7 +105,7 @@ func TestStore(t *testing.T) {
 
 func TestStoreMissingDB(t *testing.T) {
 	s := &Store{Path: filepath.Join(t.TempDir(), "nope.db")}
-	if _, err := s.TaskFor(context.Background(), Proc{Dir: "/w"}, nil); err != ErrNoDB {
+	if _, err := taskFor(context.Background(), s, Proc{Dir: "/w"}); err != ErrNoDB {
 		t.Fatalf("err = %v, want ErrNoDB", err)
 	}
 }
@@ -236,53 +237,62 @@ func TestTaskForRelatedDirs(t *testing.T) {
 		root + "/":         "proj", // exact beats the newer subfolder task
 		filepath.Dir(root): "proj", // above both; newest wins, "/" never does
 	} {
-		task, err := s.TaskFor(ctx, Proc{Dir: dir}, nil)
+		task, err := taskFor(ctx, s, Proc{Dir: dir})
 		if err != nil || task == nil || task.ID != want {
 			t.Errorf("TaskFor(%s) = %+v, %v; want %s", dir, task, err, want)
 		}
 	}
-	if task, _ := s.TaskFor(ctx, Proc{Dir: "/elsewhere"}, nil); task != nil {
+	if task, _ := taskFor(ctx, s, Proc{Dir: "/elsewhere"}); task != nil {
 		t.Errorf("unrelated dir matched %+v", task)
 	}
 }
 
-// bob 2.0.5 leaves tasks.directory empty: match by -r id, then by when the
-// process started.
-func TestTaskForWithoutDirectories(t *testing.T) {
+// taskFor assigns a session to a single bob process.
+func taskFor(ctx context.Context, s *Store, p Proc) (*Task, error) {
+	m, err := s.Assign(ctx, map[string]Proc{"sf": p})
+	return m["sf"], err
+}
+
+// bob 2.0.5 leaves tasks.directory empty: sessions go to bobs by -r id,
+// then by when each bob started, one terminal per session.
+func TestAssignWithoutDirectories(t *testing.T) {
 	path, db := Fixture(t)
 	t0 := time.Date(2026, 10, 8, 13, 0, 0, 0, time.UTC)
-	ms := func(min int) int64 { return t0.Add(time.Duration(min) * time.Minute).UnixMilli() }
+	at := func(min int) time.Time { return t0.Add(time.Duration(min) * time.Minute) }
+	ms := func(min int) int64 { return at(min).UnixMilli() }
 	mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at)
 		VALUES ('old', 'p', 'old', 'active', '', ?, ?),
+		       ('a1', 'p', 'a first', 'active', '', ?, ?),
 		       ('resumed', 'p', 'resumed', 'active', '', ?, ?),
-		       ('fresh', 'p', 'fresh', 'active', '', ?, ?)`,
-		ms(0), ms(1), ms(2), ms(30), ms(25), ms(26))
+		       ('b1', 'p', 'b first', 'active', '', ?, ?)`,
+		ms(-60), ms(-59), ms(1), ms(50), ms(-30), ms(55), ms(31), ms(32))
 	s := &Store{Path: path}
 	defer s.Close()
-	ctx := context.Background()
-	claimed := map[string]bool{"resumed": true}
-	for _, c := range []struct {
-		name string
-		p    Proc
-		want string
-	}{
-		{"started with -r", Proc{Dir: "/a", Resume: "resumed", Start: t0.Add(20 * time.Minute)}, "resumed"},
-		{"created after start", Proc{Dir: "/b", Start: t0.Add(20 * time.Minute)}, "fresh"},
-		{"another bob's -r task isn't ours", Proc{Dir: "/b", Start: t0.Add(28 * time.Minute)}, ""},
-		{"nothing since start", Proc{Dir: "/b", Start: t0.Add(40 * time.Minute)}, ""},
-		{"no start time", Proc{Dir: "/b"}, ""},
-	} {
-		task, err := s.TaskFor(ctx, c.p, claimed)
-		got := ""
-		if task != nil {
-			got = task.ID
-		}
-		if err != nil || got != c.want {
-			t.Errorf("%s: got %q, %v; want %q", c.name, got, err, c.want)
-		}
+	got, err := s.Assign(context.Background(), map[string]Proc{
+		"A": {Start: at(0)},                     // started 13:00, chatted at 13:01
+		"B": {Start: at(30)},                    // started 13:30, chatted at 13:31
+		"C": {Start: at(40)},                    // started 13:40, nothing yet
+		"R": {Start: at(45), Resume: "resumed"}, // bob -r resumed
+		"X": {Start: at(46), Resume: "missing"}, // -r of a task that's gone: by time
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Without the claim, a task touched after start counts.
-	if task, _ := s.TaskFor(ctx, Proc{Start: t0.Add(28 * time.Minute)}, nil); task == nil || task.ID != "resumed" {
-		t.Errorf("updated after start: %+v", task)
+	ids := map[string]string{}
+	for k, v := range got {
+		ids[k] = v.ID
+	}
+	want := map[string]string{"A": "a1", "B": "b1", "R": "resumed"}
+	if fmt.Sprint(ids) != fmt.Sprint(want) {
+		t.Errorf("assigned %v, want %v", ids, want)
+	}
+
+	// A lone bob that started a new session (/new) moves on to it.
+	mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at) VALUES ('a2', 'p', 'a second', 'active', '', ?, ?)`, ms(60), ms(60))
+	if task, _ := taskFor(context.Background(), s, Proc{Start: at(0)}); task == nil || task.ID != "a2" {
+		t.Errorf("after /new: %+v", task)
+	}
+	if task, _ := taskFor(context.Background(), s, Proc{}); task != nil {
+		t.Errorf("no start time matched %+v", task)
 	}
 }

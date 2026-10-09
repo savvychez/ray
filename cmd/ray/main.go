@@ -478,34 +478,36 @@ func bobDiag(args []string) error {
 		return err
 	}
 	det := &bob.ProcDetector{TTL: time.Hour}
-	claimed := map[string]bool{}
-	for _, p := range det.Procs(ctx) {
-		if p.Resume != "" {
-			claimed[p.Resume] = true
-		}
-	}
-	fmt.Println("\ncmux terminals:")
+	type term struct{ ws, title, id, tty string }
+	var terms []term
+	bySurface := map[string]bob.Proc{}
 	for _, ws := range wss {
 		for _, s := range ws.Surfaces {
 			if s.Type != "" && s.Type != "terminal" {
 				continue
 			}
-			fmt.Printf("  %s / %s  [%s] tty %q", ws.Title, s.Title, s.ID, s.TTY)
-			p, ok := det.Lookup(ctx, s.ID, s.TTY)
-			if !ok {
-				fmt.Println()
-				continue
+			terms = append(terms, term{ws.Title, s.Title, s.ID, s.TTY})
+			if p, ok := det.Lookup(ctx, s.ID, s.TTY); ok {
+				bySurface[s.ID] = p
 			}
-			fmt.Printf("\n    → bob (pid %s) in %s", p.PID, p.Dir)
-			task, err := store.TaskFor(ctx, p, claimed)
-			switch {
-			case err != nil:
-				fmt.Printf("; session: %v\n", err)
-			case task == nil:
-				fmt.Printf("; no session yet\n")
-			default:
-				fmt.Printf("; session %s %q live=%v\n", task.ID, task.Title, task.Live)
-			}
+		}
+	}
+	assigned, assignErr := store.Assign(ctx, bySurface)
+	fmt.Println("\ncmux terminals:")
+	for _, t := range terms {
+		fmt.Printf("  %s / %s  [%s] tty %q\n", t.ws, t.title, t.id, t.tty)
+		p, ok := bySurface[t.id]
+		if !ok {
+			continue
+		}
+		fmt.Printf("    → bob (pid %s) in %s; ", p.PID, p.Dir)
+		switch task := assigned[t.id]; {
+		case assignErr != nil:
+			fmt.Printf("session: %v\n", assignErr)
+		case task == nil:
+			fmt.Printf("no session yet\n")
+		default:
+			fmt.Printf("session %s %q\n", task.ID, task.Title)
 		}
 	}
 	return nil

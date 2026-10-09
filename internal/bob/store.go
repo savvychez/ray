@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -107,54 +108,117 @@ func (s *Store) Close() error {
 	return err
 }
 
-// TaskFor returns the session bob process p is running (or last ran).
-// bob 2.0.5 leaves tasks.directory empty, so in order of preference:
+// Assign works out which session each running bob is showing, given the
+// bob processes by cmux surface id. bob 2.0.5 leaves tasks.directory
+// empty and keeps no lease, so in order of preference:
 //
-//  1. the task p was started with (bob -r <id>);
-//  2. a task recorded for p's directory, or a folder above or below it;
-//  3. a task created after p started, then one updated after p started.
+//  1. the task a bob was started with (bob -r <id>);
+//  2. a task recorded for its directory, or a folder above or below it;
+//  3. by time: newest-started bob first, each takes the newest task created
+//     since it started that no other bob has taken.
 //
-// claimed holds task ids other bob processes were started with, which are
-// theirs, not p's. Within a rank, a task whose lease is live wins, then
-// the most recently updated.
-func (s *Store) TaskFor(ctx context.Context, p Proc, claimed map[string]bool) (*Task, error) {
+// Each task goes to at most one terminal, so several bobs never all show
+// the newest session.
+func (s *Store) Assign(ctx context.Context, procs map[string]Proc) (map[string]*Task, error) {
 	tasks, err := s.recent(ctx, 500)
 	if err != nil {
 		return nil, err
 	}
-	want := cleanDir(p.Dir)
-	start := p.Start.Add(-5 * time.Second).UnixMilli() // ps rounds to the second
-	var best *Task
-	bestRank := 0
-	for i := range tasks {
-		t := &tasks[i]
-		rank := 0
-		got := cleanDir(t.Directory)
-		switch {
-		case p.Resume != "" && t.ID == p.Resume:
-			rank = 6
-		case p.Resume != "":
-			// started on a specific task: only that one (or what bob moved
-			// on to since, below) is p's.
-		case want != "" && got == want:
-			rank = 5
-		case want != "" && got != "" && got != "/" && (within(want, got) || within(got, want)):
-			rank = 4
+	out := map[string]*Task{}
+	taken := map[string]bool{}
+	take := func(sf string, t *Task) {
+		out[sf] = t
+		taken[t.ID] = true
+	}
+	keys := make([]string, 0, len(procs))
+	for sf := range procs {
+		keys = append(keys, sf)
+	}
+	// Newest-started first (ties by id, for a stable answer).
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := procs[keys[i]].Start, procs[keys[j]].Start
+		if !a.Equal(b) {
+			return a.After(b)
 		}
-		if rank == 0 && !p.Start.IsZero() && !claimed[t.ID] && got == "" {
-			switch {
-			case t.CreatedAt >= start:
-				rank = 3
-			case t.UpdatedAt >= start && p.Resume == "":
-				rank = 2
+		return keys[i] < keys[j]
+	})
+
+	for _, sf := range keys {
+		if id := procs[sf].Resume; id != "" {
+			for i := range tasks {
+				if tasks[i].ID == id {
+					take(sf, &tasks[i])
+					break
+				}
 			}
 		}
-		// tasks come live-first, newest-first, so the first at a rank wins.
-		if rank > bestRank {
-			best, bestRank = t, rank
+	}
+	for _, sf := range keys {
+		p := procs[sf]
+		want := cleanDir(p.Dir)
+		if out[sf] != nil || want == "" {
+			continue
+		}
+		var best *Task
+		bestRank := 0
+		for i := range tasks {
+			t := &tasks[i]
+			got := cleanDir(t.Directory)
+			rank := 0
+			switch {
+			case taken[t.ID] || got == "":
+			case got == want:
+				rank = 2
+			case got != "/" && (within(want, got) || within(got, want)):
+				rank = 1
+			}
+			// tasks come live-first, newest-first, so the first at a rank wins.
+			if rank > bestRank {
+				best, bestRank = t, rank
+			}
+		}
+		if best != nil {
+			take(sf, best)
 		}
 	}
-	return best, nil
+	for _, sf := range keys {
+		p := procs[sf]
+		if out[sf] != nil || p.Start.IsZero() {
+			continue
+		}
+		start := p.Start.Add(-5 * time.Second).UnixMilli() // ps rounds to the second
+		var best *Task
+		for i := range tasks {
+			t := &tasks[i]
+			if taken[t.ID] || t.Directory != "" || t.CreatedAt < start {
+				continue
+			}
+			if best == nil || t.CreatedAt > best.CreatedAt {
+				best = t
+			}
+		}
+		if best != nil {
+			take(sf, best)
+		}
+	}
+	return out, nil
+}
+
+// Task returns one task by id, or nil.
+func (s *Store) Task(ctx context.Context, id string) (*Task, error) {
+	db, err := s.open()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, taskQuery+` WHERE id = ?`, time.Now().UnixMilli(), id)
+	if err != nil {
+		return nil, err
+	}
+	ts, err := scanTasks(rows)
+	if err != nil || len(ts) == 0 {
+		return nil, err
+	}
+	return &ts[0], nil
 }
 
 // RecentTasks lists bob's most recent top-level tasks, live ones first.
@@ -162,22 +226,27 @@ func (s *Store) RecentTasks(ctx context.Context, n int) ([]Task, error) {
 	return s.recent(ctx, n)
 }
 
+const taskQuery = `
+		SELECT id, COALESCE(title, ''), COALESCE(status, ''), COALESCE(directory, ''), COALESCE(costs, ''), created_at, updated_at,
+		       (locked_by IS NOT NULL AND COALESCE(lock_lease_until, 0) > ?) AS live
+		FROM tasks`
+
 func (s *Store) recent(ctx context.Context, n int) ([]Task, error) {
 	db, err := s.open()
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UnixMilli()
-	rows, err := db.QueryContext(ctx, `
-		SELECT id, COALESCE(title, ''), COALESCE(status, ''), COALESCE(directory, ''), COALESCE(costs, ''), created_at, updated_at,
-		       (locked_by IS NOT NULL AND COALESCE(lock_lease_until, 0) > ?) AS live
-		FROM tasks
+	rows, err := db.QueryContext(ctx, taskQuery+`
 		WHERE parent_id IS NULL
 		ORDER BY live DESC, updated_at DESC
-		LIMIT ?`, now, n)
+		LIMIT ?`, time.Now().UnixMilli(), n)
 	if err != nil {
 		return nil, err
 	}
+	return scanTasks(rows)
+}
+
+func scanTasks(rows *sql.Rows) ([]Task, error) {
 	defer rows.Close()
 	var out []Task
 	for rows.Next() {
