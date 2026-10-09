@@ -20,6 +20,7 @@ type BobWatcher struct {
 	mu        sync.Mutex
 	procs     map[string]bob.Proc // surface id → the bob running there
 	assigned  map[string]string   // surface id → task id it shows
+	screens   map[string]screenAt // latest text of watched bob terminals
 	assignAt  time.Time
 	assignErr error
 }
@@ -45,6 +46,25 @@ func (w *BobWatcher) Annotate(ctx context.Context, wss []Workspace) {
 	w.mu.Unlock()
 }
 
+type screenAt struct {
+	text string
+	at   time.Time
+}
+
+// noteScreen records what bob terminal sf shows: evidence for which of
+// its sessions bob is in.
+func (w *BobWatcher) noteScreen(sf, text string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.procs[sf]; !ok {
+		return
+	}
+	if w.screens == nil {
+		w.screens = map[string]screenAt{}
+	}
+	w.screens[sf] = screenAt{text, time.Now()}
+}
+
 // assignEvery bounds how stale the terminal → session assignment gets; a
 // new session (bob's first message) shows up within this.
 const assignEvery = time.Second
@@ -58,7 +78,13 @@ func (w *BobWatcher) task(ctx context.Context, sf string) (task *bob.Task, ok bo
 		return nil, false, nil
 	}
 	if time.Since(w.assignAt) > assignEvery {
-		got, err := w.Store.Assign(ctx, w.procs)
+		screens := map[string]string{}
+		for k, sc := range w.screens {
+			if time.Since(sc.at) < 30*time.Second {
+				screens[k] = sc.text
+			}
+		}
+		got, err := w.Store.Assign(ctx, w.procs, bob.Hints{Screens: screens, Prev: w.assigned})
 		w.assigned, w.assignErr, w.assignAt = map[string]string{}, err, time.Now()
 		for k, t := range got {
 			w.assigned[k] = t.ID

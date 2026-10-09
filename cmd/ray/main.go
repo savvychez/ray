@@ -473,7 +473,8 @@ func bobDiag(args []string) error {
 		return err
 	}
 	defer c.Close()
-	wss, err := (&server.CmuxBackend{C: c}).Tree(ctx)
+	cb := &server.CmuxBackend{C: c}
+	wss, err := cb.Tree(ctx)
 	if err != nil {
 		return err
 	}
@@ -492,7 +493,18 @@ func bobDiag(args []string) error {
 			}
 		}
 	}
-	assigned, assignErr := store.Assign(ctx, bySurface)
+	// What each bob terminal shows helps tell its sessions apart.
+	screens := map[string]string{}
+	for _, ws := range wss {
+		for _, s := range ws.Surfaces {
+			if _, ok := bySurface[s.ID]; ok {
+				if text, err := cb.ReadText(ctx, ws.ID, s.ID, 0); err == nil {
+					screens[s.ID] = text
+				}
+			}
+		}
+	}
+	assigned, assignErr := store.Assign(ctx, bySurface, bob.Hints{Screens: screens})
 	fmt.Println("\ncmux terminals:")
 	for _, t := range terms {
 		fmt.Printf("  %s / %s  [%s] tty %q\n", t.ws, t.title, t.id, t.tty)

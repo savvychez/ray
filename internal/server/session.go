@@ -404,6 +404,7 @@ func (ss *session) pollScreen(ctx context.Context) {
 			chat.last = time.Now()
 			if err == nil {
 				chat.screen(cur.sf, text)
+				ss.srv.Bob.noteScreen(cur.sf, text)
 			}
 			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			ss.srv.Bob.poll(cctx, cur.ws, cur.sf, &chat, ss.send)
