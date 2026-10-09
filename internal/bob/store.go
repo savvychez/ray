@@ -50,6 +50,7 @@ type Task struct {
 	ID        string  `json:"id"`
 	Title     string  `json:"title"`
 	Status    string  `json:"status"`
+	ProjectID string  `json:"project_id,omitempty"`
 	Directory string  `json:"directory"`
 	Cost      float64 `json:"cost,omitempty"`
 	Live      bool    `json:"live"` // a bob process holds its lease
@@ -199,6 +200,8 @@ func (s *Store) Assign(ctx context.Context, procs map[string]Proc, h Hints) (map
 		}
 	}
 
+	projects := s.projects(ctx)
+
 	// By time. First each bob's launch task: the earliest created just after
 	// it started.
 	open := func(t *Task) bool { return !taken[t.ID] && t.Directory == "" }
@@ -231,10 +234,17 @@ func (s *Store) Assign(ctx context.Context, procs map[string]Proc, h Hints) (map
 		from := p.Start.Add(-5 * time.Second).UnixMilli()
 		var cands []*Task
 		if p.ResumeLast {
-			// bob -r resumed its latest session: one from before it started,
-			// most likely the most recently updated one nobody else has.
+			// bob -r resumed the latest session of the folder it started in:
+			// one from before it started, in that folder's project, most
+			// likely the most recently updated one nobody else has. The
+			// project comes from bob's projects table, or else from the
+			// task bob created as it started.
+			proj := projects[cleanDir(p.Dir)]
+			if l := launch[sf]; proj == "" && l != nil {
+				proj = l.ProjectID
+			}
 			for i := range tasks {
-				if t := &tasks[i]; open(t) && t.CreatedAt < from && len(cands) < 6 {
+				if t := &tasks[i]; open(t) && t.CreatedAt < from && (proj == "" || t.ProjectID == proj) && len(cands) < 6 {
 					cands = append(cands, t)
 				}
 			}
@@ -264,6 +274,52 @@ func (s *Store) Assign(ctx context.Context, procs map[string]Proc, h Hints) (map
 		take(sf, pick)
 	}
 	return out, nil
+}
+
+// projects maps folders to bob project ids, from bob's projects table if
+// it has one with a path-like column. Best-effort: bob's schema for it
+// isn't known, so anything unexpected just yields nothing.
+func (s *Store) projects(ctx context.Context) map[string]string {
+	out := map[string]string{}
+	db, err := s.open()
+	if err != nil {
+		return out
+	}
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('projects')`)
+	if err != nil {
+		return out
+	}
+	cols := map[string]bool{}
+	for rows.Next() {
+		var c string
+		if rows.Scan(&c) == nil {
+			cols[c] = true
+		}
+	}
+	rows.Close()
+	if !cols["id"] {
+		return out
+	}
+	for _, c := range []string{"directory", "path", "root", "root_path", "worktree", "cwd", "dir", "folder"} {
+		if !cols[c] {
+			continue
+		}
+		rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(`+c+`, '') FROM projects`)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var id, dir string
+			if rows.Scan(&id, &dir) == nil && dir != "" {
+				out[cleanDir(dir)] = id
+			}
+		}
+		rows.Close()
+		if len(out) > 0 {
+			break
+		}
+	}
+	return out
 }
 
 // onScreen picks the task whose recent messages are on a terminal screen,
@@ -327,7 +383,7 @@ func (s *Store) RecentTasks(ctx context.Context, n int) ([]Task, error) {
 }
 
 const taskQuery = `
-		SELECT id, COALESCE(title, ''), COALESCE(status, ''), COALESCE(directory, ''), COALESCE(costs, ''), created_at, updated_at,
+		SELECT id, COALESCE(title, ''), COALESCE(status, ''), COALESCE(project_id, ''), COALESCE(directory, ''), COALESCE(costs, ''), created_at, updated_at,
 		       (locked_by IS NOT NULL AND COALESCE(lock_lease_until, 0) > ?) AS live
 		FROM tasks`
 
@@ -352,7 +408,7 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 	for rows.Next() {
 		var t Task
 		var costs string
-		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.Directory, &costs, &t.CreatedAt, &t.UpdatedAt, &t.Live); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.ProjectID, &t.Directory, &costs, &t.CreatedAt, &t.UpdatedAt, &t.Live); err != nil {
 			return nil, err
 		}
 		t.Cost = totalCost(costs)

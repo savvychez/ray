@@ -464,7 +464,7 @@ func bobDiag(args []string) error {
 			fmt.Printf("  %v\n", err)
 		}
 		for _, t := range recent {
-			fmt.Printf("  %s live=%-5v created %s updated %s  %q  dir %q\n", t.ID, t.Live, time.UnixMilli(t.CreatedAt).Format("Jan 2 15:04:05"), time.UnixMilli(t.UpdatedAt).Format("Jan 2 15:04:05"), t.Title, t.Directory)
+			fmt.Printf("  %s live=%-5v project %s created %s updated %s  %q  dir %q\n", t.ID, t.Live, t.ProjectID, time.UnixMilli(t.CreatedAt).Format("Jan 2 15:04:05"), time.UnixMilli(t.UpdatedAt).Format("Jan 2 15:04:05"), t.Title, t.Directory)
 		}
 	}
 

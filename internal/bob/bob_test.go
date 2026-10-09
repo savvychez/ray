@@ -325,3 +325,38 @@ func TestAssignWithoutDirectories(t *testing.T) {
 		t.Errorf("bare -r: %s, want %s", got, want)
 	}
 }
+
+// A bare -r resumes the latest session of the folder bob started in,
+// identified by project: from the projects table, or else from the task
+// bob created as it started.
+func TestAssignResumeLastByFolder(t *testing.T) {
+	path, db := Fixture(t)
+	t0 := time.Date(2026, 10, 9, 13, 0, 0, 0, time.UTC)
+	at := func(min int) int64 { return t0.Add(time.Duration(min) * time.Minute).UnixMilli() }
+	task := func(id, proj string, created, updated int64) {
+		mustExec(t, db, `INSERT INTO tasks (id, project_id, title, status, directory, created_at, updated_at) VALUES (?, ?, ?, 'active', '', ?, ?)`, id, proj, id, created, updated)
+	}
+	task("a-old", "pa", at(-100), at(-90))
+	task("b-old", "pb", at(-80), at(-70))
+	task("a-newest", "pa", at(-60), at(-5)) // most recent overall, other folder
+	task("b-launch", "pb", t0.Add(2*time.Second).UnixMilli(), t0.Add(2*time.Second).UnixMilli())
+	s := &Store{Path: path}
+	defer s.Close()
+	ctx := context.Background()
+	p := Proc{Start: t0, ResumeLast: true, Dir: "/work/b"}
+
+	// By the launch task's project.
+	if got, _ := taskFor(ctx, s, p); got == nil || got.ID != "b-old" {
+		t.Errorf("by launch task: %+v, want b-old", got)
+	}
+	// By the projects table, even with no launch task to go on.
+	mustExec(t, db, `DELETE FROM tasks WHERE id = 'b-launch'`)
+	if got, _ := taskFor(ctx, s, p); got == nil || got.ID != "a-newest" {
+		t.Errorf("no project known: %+v, want the latest session", got)
+	}
+	mustExec(t, db, `CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT)`)
+	mustExec(t, db, `INSERT INTO projects VALUES ('pa', '/work/a'), ('pb', '/work/b/')`)
+	if got, _ := taskFor(ctx, s, p); got == nil || got.ID != "b-old" {
+		t.Errorf("by projects table: %+v, want b-old", got)
+	}
+}
