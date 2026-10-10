@@ -168,7 +168,18 @@ const RELOAD_AFTER_HIDDEN_MS = 45 * 1000;
 // A frozen timer this long means iOS suspended the page; see the heartbeat.
 const RELOAD_AFTER_STALL_MS = 20 * 1000;
 let hiddenAt = 0;
+// A reload while iOS has the app in the background loads a page it never
+// paints: the black screen that needed a swipe-up to clear. So a reload
+// that comes due while hidden waits until the app is really in front:
+// visible again, focused, or touched (a page iOS left reporting hidden
+// still gets touches).
+let reloadDue = "";
 function reloadFresh(reason) {
+  if (document.hidden && !document.hasFocus()) {
+    if (!reloadDue) diag.log("reload-due", reason || "");
+    reloadDue = reason || "due";
+    return;
+  }
   diag.log("reload", reason || "");
   try {
     const draft = document.getElementById("input")?.value;
@@ -176,6 +187,13 @@ function reloadFresh(reason) {
   } catch {}
   location.reload();
 }
+function reloadIfDue(how) {
+  if (reloadDue) reloadFresh(reloadDue + " (" + how + ")");
+}
+for (const ev of ["pointerdown", "touchstart", "keydown"]) {
+  window.addEventListener(ev, () => reloadIfDue(ev), { capture: true, passive: true });
+}
+window.addEventListener("focus", () => reloadIfDue("focus"));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     hiddenAt = Date.now();
@@ -185,6 +203,7 @@ document.addEventListener("visibilitychange", () => {
   const away = hiddenAt ? Date.now() - hiddenAt : 0;
   hiddenAt = 0;
   diag.log("visible", { away: Math.round(away / 1000) + "s", h: innerHeight, vv: Math.round(visualViewport?.height || 0) });
+  if (reloadDue) return reloadIfDue("visible");
   if (away > RELOAD_AFTER_HIDDEN_MS) return reloadFresh("away " + Math.round(away / 1000) + "s");
   repaint();
 });
@@ -192,8 +211,9 @@ window.addEventListener("pagehide", (e) => diag.log("pagehide", { persisted: e.p
 document.addEventListener("freeze", () => diag.log("freeze"));
 document.addEventListener("resume", () => diag.log("resume"));
 
-// Heartbeat: if timers stopped for a long stretch, treat it like a long
-// background on the next tick (iOS doesn't always send visibilitychange).
+// Heartbeat: if timers stopped for a long stretch, the page was suspended
+// and the connection is gone; reload (once the app is in front, above).
+// Also notices a return iOS didn't announce with visibilitychange.
 {
   let beat = Date.now();
   setInterval(() => {
@@ -202,11 +222,9 @@ document.addEventListener("resume", () => diag.log("resume"));
     beat = now;
     if (gap > 10000) {
       diag.log("stall", { gap: Math.round(gap / 1000) + "s", hidden: document.hidden, vis: document.visibilityState, focus: document.hasFocus() });
-      // Seen on iOS: on return the page's timers resume but it still reports
-      // hidden, gets no visibilitychange, and isn't repainted (black screen).
-      // So reload after any long freeze, whatever visibility claims; if we
-      // really are in the background, the reload is harmless.
       if (gap > RELOAD_AFTER_STALL_MS) reloadFresh("stall " + Math.round(gap / 1000) + "s");
+    } else if (reloadDue && (!document.hidden || document.hasFocus())) {
+      reloadIfDue("tick");
     }
   }, 2000);
 }
