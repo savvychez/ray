@@ -10,6 +10,7 @@ const SHELL = [
   "bob.js",
   "style.css",
   "wasm_exec.js",
+  "tailcat-worker.js",
   "manifest.webmanifest",
   "icon.svg",
   "icon-192.png",

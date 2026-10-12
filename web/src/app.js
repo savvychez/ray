@@ -1,5 +1,5 @@
 // ray PWA. Plain JavaScript, no build step. The Go/wasm side
-// (web/wasm/main_js.go) provides rayNewKey, rayPublicKey and rayDial.
+// (web/wasm/main_js.go) runs in tailcat-worker.js; see "tailcat" below.
 //
 // Wire protocol: newline-delimited JSON frames over one tailcat TCP
 // stream; see internal/server/session.go.
@@ -181,6 +181,7 @@ function reloadFresh(reason) {
     return;
   }
   diag.log("reload", reason || "");
+  tailcat.terminate(); // a busy worker mustn't hold up the reload
   try {
     const draft = document.getElementById("input")?.value;
     if (draft) sessionStorage.setItem("ray.draft", draft);
@@ -222,7 +223,12 @@ document.addEventListener("resume", () => diag.log("resume"));
     beat = now;
     if (gap > 10000) {
       diag.log("stall", { gap: Math.round(gap / 1000) + "s", hidden: document.hidden, vis: document.visibilityState, focus: document.hasFocus() });
-      if (gap > RELOAD_AFTER_STALL_MS) reloadFresh("stall " + Math.round(gap / 1000) + "s");
+      if (gap > RELOAD_AFTER_STALL_MS) {
+        // The connection is dead after a freeze this long, and the Go
+        // runtime's catch-up work is wasted; stop it now.
+        tailcat.terminate();
+        reloadFresh("stall " + Math.round(gap / 1000) + "s");
+      }
     } else if (reloadDue && (!document.hidden || document.hasFocus())) {
       reloadIfDue("tick");
     }
@@ -233,52 +239,113 @@ document.addEventListener("focusout", () => setTimeout(fitViewport, 50));
 document.addEventListener("focusin", () => setTimeout(fitViewport, 50));
 fitViewport();
 
-// ---------- wasm boot ----------
+// ---------- tailcat (in a worker) ----------
+// The Go/wasm transport runs in tailcat-worker.js, off the main thread: on
+// resuming from a long iOS freeze its catch-up work used to lock the page
+// (black, deaf to taps, unable to reload). This proxies its API.
 
-async function fetchWasm(onProgress) {
-  const counted = (resp, total) => {
-    let loaded = 0;
-    return resp.body.pipeThrough(new TransformStream({
-      transform(chunk, c) {
-        loaded += chunk.byteLength;
-        if (total) onProgress(Math.min(1, loaded / total));
-        c.enqueue(chunk);
-      },
-    }));
-  };
-  // GitHub Pages doesn't compress .wasm, so ship it pre-gzipped.
-  if ("DecompressionStream" in window) {
-    const gz = await fetch("ray.wasm.gz");
-    if (gz.ok) {
-      const total = Number(gz.headers.get("Content-Length")) || 0;
-      const body = counted(gz, total).pipeThrough(new DecompressionStream("gzip"));
-      return new Response(body, { headers: { "Content-Type": "application/wasm" } });
-    }
+const tailcat = {
+  worker: null,
+  calls: new Map(), // request id -> {resolve, reject}
+  conns: new Map(), // conn id -> WorkerConn
+  nextId: 1,
+
+  start(onProgress) {
+    return new Promise((resolve, reject) => {
+      const w = new Worker("tailcat-worker.js");
+      this.worker = w;
+      w.onmessage = (e) => {
+        const m = e.data;
+        switch (m.op) {
+          case "progress": onProgress(m.f); break;
+          case "ready": resolve(); break;
+          case "fatal": reject(new Error(m.error)); break;
+          case "result": {
+            const p = this.calls.get(m.id);
+            this.calls.delete(m.id);
+            if (p) m.ok ? p.resolve(m.value) : p.reject(new Error(m.error));
+            break;
+          }
+          default:
+            if (m.conn) this.conn(m.conn).push(m);
+        }
+      };
+      w.onerror = (e) => reject(new Error(e.message || "tailcat worker failed"));
+    });
+  },
+
+  request(msg, transfer) {
+    if (!this.worker) return Promise.reject(new Error("tailcat stopped"));
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.calls.set(id, { resolve, reject });
+      this.worker.postMessage({ ...msg, id }, transfer || []);
+    });
+  },
+
+  conn(id) {
+    let c = this.conns.get(id);
+    if (!c) this.conns.set(id, (c = new WorkerConn(id)));
+    return c;
+  },
+
+  async dial(opts) {
+    return this.conn(await this.request({ op: "dial", opts }));
+  },
+
+  // terminate kills the worker however busy it is; connections end.
+  terminate() {
+    if (!this.worker) return;
+    this.worker.terminate();
+    this.worker = null;
+    for (const [, p] of this.calls) p.reject(new Error("tailcat stopped"));
+    this.calls.clear();
+    for (const [, c] of this.conns) c.push({ op: "err", error: "tailcat stopped" });
+    this.conns.clear();
+  },
+};
+
+// WorkerConn is a connection living in the worker: {read, write, close},
+// like rayDial's conn.
+class WorkerConn {
+  constructor(id) {
+    this.id = id;
+    this.queue = []; // arrived, not yet read: {value} or {error}
+    this.readers = [];
   }
-  const resp = await fetch("ray.wasm");
-  if (!resp.ok) throw new Error(`fetching ray.wasm: ${resp.status}`);
-  const total = Number(resp.headers.get("Content-Length")) || 0;
-  return new Response(counted(resp, total), { headers: { "Content-Type": "application/wasm" } });
+  push(m) {
+    const v = m.op === "data" ? { value: m.chunk } : m.op === "eof" ? { value: null } : { error: new Error(m.error) };
+    const r = this.readers.shift();
+    if (!r) return this.queue.push(v);
+    v.error ? r.reject(v.error) : r.resolve(v.value);
+  }
+  read() {
+    const v = this.queue.shift();
+    if (v) return v.error ? Promise.reject(v.error) : Promise.resolve(v.value);
+    return new Promise((resolve, reject) => this.readers.push({ resolve, reject }));
+  }
+  write(u8) {
+    const data = u8.slice().buffer;
+    return tailcat.request({ op: "write", conn: this.id, data }, [data]);
+  }
+  close() {
+    tailcat.conns.delete(this.id);
+    tailcat.worker?.postMessage({ op: "close", conn: this.id });
+    for (const r of this.readers.splice(0)) r.resolve(null);
+  }
 }
 
 async function bootWasm() {
   const bar = $("loader-bar");
   const text = $("loader-text");
   text.textContent = "Loading tailcat…";
-  const ready = new Promise((resolve) => { globalThis.onRayWasmReady = resolve; });
-  const go = new Go();
-  const { instance } = await WebAssembly.instantiateStreaming(
-    fetchWasm((f) => { bar.value = f; text.textContent = `Loading tailcat… ${Math.floor(f * 100)}%`; }),
-    go.importObject,
-  );
-  go.run(instance);
-  await ready;
+  await tailcat.start((f) => { bar.value = f; text.textContent = `Loading tailcat… ${Math.floor(f * 100)}%`; });
 }
 
-function deviceKey() {
+async function deviceKey() {
   let k = store.get("device", null);
   if (!k || !k.privateKeyJSON) {
-    k = rayNewKey();
+    k = await tailcat.request({ op: "call", fn: "rayNewKey", args: [] });
     store.set("device", k);
   }
   return k;
@@ -342,10 +409,10 @@ class Link {
     if (this.stopped) return;
     this.drop();
     this.setState("connecting");
-    const key = deviceKey();
     let conn;
     try {
-      conn = await rayDial({
+      const key = await deviceKey();
+      conn = await tailcat.dial({
         addr: this.host.addr,
         privateKey: key.privateKeyJSON,
         derpMapURL: this.host.derp || DEFAULT_DERP_MAP,
