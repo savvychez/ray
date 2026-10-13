@@ -37,6 +37,7 @@ import (
 
 	"github.com/savvychez/ray/internal/bob"
 	"github.com/savvychez/ray/internal/cmux"
+	"github.com/savvychez/ray/internal/push"
 	"github.com/savvychez/ray/internal/server"
 )
 
@@ -115,6 +116,7 @@ func homeDir() string {
 func keyPath() string     { return filepath.Join(homeDir(), "key.json") }
 func devicesPath() string { return filepath.Join(homeDir(), "devices.json") }
 func ctlPath() string     { return filepath.Join(homeDir(), "ctl.sock") }
+func pushPath() string    { return filepath.Join(homeDir(), "push.json") }
 
 // loadOrCreateKey returns a persistent tailcat identity so the address
 // (and therefore the phone's saved connection) survives restarts.
@@ -166,6 +168,7 @@ func serve(args []string) error {
 	verbose := fs.Bool("v", false, "verbose tailcat logging")
 	bobOn := fs.Bool("bob", true, "show terminals running IBM Bob Shell as a chat")
 	bobDB := fs.String("bob-db", bob.DefaultPath(), "Bob Shell's session database")
+	notify := fs.Bool("notify", true, "push a notification to paired phones when bob finishes or needs approval")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -206,6 +209,23 @@ func serve(args []string) error {
 		store := &bob.Store{Path: *bobDB}
 		defer store.Close()
 		srv.Bob = &server.BobWatcher{Store: store, Detect: &bob.ProcDetector{}}
+		if *notify {
+			srv.Push = &push.Notifier{
+				Path:    pushPath(),
+				Subject: *appURL,
+				Allowed: func(dev string) bool { // still paired
+					devs, _ := pairing.Devices()
+					for _, d := range devs {
+						if d.Key == dev {
+							return true
+						}
+					}
+					return false
+				},
+			}
+			srv.PeerKey = func(c net.Conn) (string, bool) { return pairing.PeerKey(c) }
+			go srv.NotifyBob(ctx, 4*time.Second)
+		}
 	}
 	log.Printf("ray %s", version())
 	ts, region, err := startTailcat(ctx, pk, *derpMapURL, logf, srv, pairing)

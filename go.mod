@@ -3,6 +3,7 @@ module github.com/savvychez/ray
 go 1.27.1
 
 require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/tailscale/tailcat v0.7.1-0.20260929145319-b4dc28e8aa89
 	modernc.org/sqlite v1.60.1
@@ -48,6 +49,7 @@ require (
 	github.com/go4org/hashtriemap v0.0.0-20260925222741-44e5305f85d9 // indirect
 	github.com/go4org/plan9netshell v0.0.0-20250324183649-788daa080737 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
+	github.com/golang-jwt/jwt/v5 v5.2.1 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect

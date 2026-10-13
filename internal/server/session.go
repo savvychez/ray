@@ -30,12 +30,15 @@ const ProtocolVersion = 1
 //	key    {ws, sf, key}           press a named key (enter, tab, escape, up, …)
 //	focus  {ws, sf}                bring a workspace/surface to front on the Mac
 //	approve {ws, sf, data}         answer bob's permission prompt: once|always|reject
+//	push-sub {data}                Web Push subscription (JSON) for bob notifications
+//	push-unsub {}                  stop them
 //	new    {}                      create a workspace
 //	ping   {}
 //
 // Server → client:
 //
-//	welcome {host, backend, version}
+//	welcome {host, backend, version, push_key?}
+//	                               push_key: VAPID key, if the server can notify
 //	tree    {workspaces}           sent on connect and whenever it changes
 //	screen  {ws, sf, drop, keep, lines}
 //	                               drop the first `drop` lines, keep the next
@@ -57,6 +60,7 @@ type Msg struct {
 	Backend string `json:"backend,omitempty"`
 	Version string `json:"version,omitempty"`
 	Code    string `json:"code,omitempty"`
+	PushKey string `json:"push_key,omitempty"`
 
 	// targeting
 	WS string `json:"ws,omitempty"`
@@ -85,13 +89,20 @@ type Server struct {
 	Hostname string
 	Version  string      // ray build, reported to clients
 	Bob      *BobWatcher // nil disables the bob chat view
-	Logf     func(format string, args ...any)
+	Push     Pusher      // nil disables notifications
+	// PeerKey identifies a connection's device (its node key), for push
+	// subscriptions.
+	PeerKey func(net.Conn) (string, bool)
+	Logf    func(format string, args ...any)
 
 	// Poll intervals; zero values use defaults.
 	TreeEvery   time.Duration
 	ScreenFast  time.Duration
 	ScreenSlow  time.Duration
 	DefaultTail int
+
+	mu       sync.Mutex
+	sessions map[*session]struct{}
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -115,7 +126,38 @@ func (s *Server) Serve(conn net.Conn) {
 		watch: make(chan watchReq, 1),
 		poke:  make(chan struct{}, 1),
 	}
+	if s.PeerKey != nil {
+		ss.device, _ = s.PeerKey(conn)
+	}
+	s.mu.Lock()
+	if s.sessions == nil {
+		s.sessions = map[*session]struct{}{}
+	}
+	s.sessions[ss] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.sessions, ss)
+		s.mu.Unlock()
+	}()
 	ss.run()
+}
+
+// watching reports whether device has the app open on terminal sf right
+// now: a session watching it that heard from the phone recently (it pings
+// every 15s while in front; a suspended app goes quiet).
+func (s *Server) watching(device, sf string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ss := range s.sessions {
+		ss.mu.Lock()
+		yes := ss.device == device && ss.watchSF == sf && time.Since(ss.lastRx) < 18*time.Second
+		ss.mu.Unlock()
+		if yes {
+			return true
+		}
+	}
+	return false
 }
 
 type watchReq struct {
@@ -131,8 +173,13 @@ type session struct {
 	watch chan watchReq
 	poke  chan struct{} // input happened; refresh screen and tree soon
 
-	mu     sync.Mutex
-	active time.Time // last input
+	device string // node key, if known
+	name   string // device name from hello
+
+	mu      sync.Mutex
+	active  time.Time // last input
+	lastRx  time.Time // last frame from the client
+	watchSF string    // surface being watched
 
 	lastText time.Time // when text was last typed; handle's goroutine only
 }
@@ -180,7 +227,16 @@ func (ss *session) run() {
 	ss.srv.logf("session %v (%q): connected", ss.conn.RemoteAddr(), hello.Name)
 	defer ss.srv.logf("session %v (%q): disconnected", ss.conn.RemoteAddr(), hello.Name)
 
-	if err := enc.Encode(Msg{T: "welcome", V: ProtocolVersion, Host: ss.srv.Hostname, Backend: ss.srv.Backend.Name(), Version: ss.srv.Version}); err != nil {
+	ss.name = hello.Name
+	welcome := Msg{T: "welcome", V: ProtocolVersion, Host: ss.srv.Hostname, Backend: ss.srv.Backend.Name(), Version: ss.srv.Version}
+	if ss.srv.Push != nil && ss.device != "" {
+		if k, err := ss.srv.Push.PublicKey(); err == nil {
+			welcome.PushKey = k
+		} else {
+			ss.srv.logf("push: %v", err)
+		}
+	}
+	if err := enc.Encode(welcome); err != nil {
 		return
 	}
 
@@ -210,6 +266,12 @@ func (ss *session) run() {
 			}
 			return
 		}
+		ss.mu.Lock()
+		ss.lastRx = time.Now()
+		if m.T == "watch" {
+			ss.watchSF = m.SF
+		}
+		ss.mu.Unlock()
 		ss.handle(ctx, m)
 		if ctx.Err() != nil {
 			return
@@ -286,6 +348,17 @@ func (ss *session) handle(ctx context.Context, m Msg) {
 	case "focus":
 		err = b.Focus(cctx, m.WS, m.SF)
 		ss.markActive()
+	case "push-sub", "push-unsub":
+		switch {
+		case ss.srv.Push == nil:
+			err = errors.New("notifications are off on this server")
+		case ss.device == "":
+			err = errors.New("can't identify this device")
+		case m.T == "push-sub":
+			err = ss.srv.Push.Subscribe(ss.device, ss.name, []byte(m.Data))
+		default:
+			err = ss.srv.Push.Unsubscribe(ss.device)
+		}
 	case "new":
 		_, err = b.NewWorkspace(cctx)
 		ss.markActive()

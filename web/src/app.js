@@ -480,7 +480,9 @@ class Link {
           saveHosts();
         }
         if (m.host && !this.host.renamed) { this.host.name = m.host; saveHosts(); }
+        this.pushKey = m.push_key || "";
         this.setState("online", m);
+        if (this.host.notify) syncPush(this).catch((e) => diag.log("push", "resync: " + e.message));
         break;
       case "error":
         if (m.code === "unauthorized") {
@@ -1209,6 +1211,8 @@ $("new-ws-btn").onclick = async () => {
 };
 $("opts-btn").onclick = (e) => {
   e.stopPropagation();
+  const nb = $("opts-menu").querySelector('[data-act="notify"]');
+  nb.textContent = currentHost()?.notify ? "Turn off bob notifications" : "Notify me about bob…";
   $("opts-menu").hidden = !$("opts-menu").hidden;
 };
 document.addEventListener("click", (e) => {
@@ -1223,6 +1227,7 @@ $("opts-menu").addEventListener("click", async (e) => {
   if (act === "font-") prefs.font = Math.max(prefs.font - 1, 8);
   if (act === "reconnect") ui.link?.retry("reconnecting");
   if (act === "diag") return showDiagnostics();
+  if (act === "notify") return toggleNotifications();
   if (act === "focus" && ui.sel) {
     try { await ui.link?.request({ t: "focus", ws: ui.sel.ws, sf: ui.sel.sf }); } catch (err) { showBanner(err.message, "err"); }
   }
@@ -1281,6 +1286,90 @@ $("diag-copy").onclick = async () => {
   setTimeout(() => { $("diag-copy").textContent = "Copy"; }, 1500);
 };
 
+// ---------- notifications ----------
+// The Mac pushes a Web Push notification when a bob finishes or needs
+// approval (see internal/server/notify.go). iOS delivers them only to an
+// app added to the Home Screen, and only after asking from a tap.
+
+const b64url = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
+const sameBytes = (a, b) => a && b && a.byteLength === b.byteLength && new Uint8Array(a).every((x, i) => x === b[i]);
+
+function pushSupported() {
+  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+
+// syncPush makes sure this device is subscribed with the server's key and
+// that the server has the subscription.
+async function syncPush(link) {
+  if (!pushSupported() || Notification.permission !== "granted") throw new Error("notifications aren't allowed");
+  if (!link.pushKey) throw new Error("this Mac's ray is too old for notifications; update it");
+  const key = b64url(link.pushKey);
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  // One subscription per app: a different Mac's key replaces it.
+  if (sub && !sameBytes(sub.options?.applicationServerKey, key)) { await sub.unsubscribe(); sub = null; }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  await link.request({ t: "push-sub", data: JSON.stringify(sub) });
+}
+
+async function toggleNotifications() {
+  const h = currentHost();
+  const link = ui.link;
+  if (!h || !link) return;
+  try {
+    if (h.notify) {
+      h.notify = false;
+      saveHosts();
+      await link.request({ t: "push-unsub" });
+      showBanner("bob notifications are off.", "info");
+      return;
+    }
+    if (!pushSupported()) {
+      throw new Error(/iPhone|iPad/.test(navigator.userAgent) && !navigator.standalone
+        ? "On iPhone, add ray to your Home Screen first (Share → Add to Home Screen), then turn notifications on from there."
+        : "This browser can't receive notifications.");
+    }
+    if (link.state !== "online") throw new Error("connect to your Mac first");
+    // Ask right away, within the tap: iOS refuses otherwise.
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") throw new Error("notifications weren't allowed (Settings → Notifications → ray)");
+    await syncPush(link);
+    h.notify = true;
+    saveHosts();
+    diag.log("push", "on");
+    showBanner("You'll be notified when a bob finishes or needs approval.", "info");
+  } catch (e) {
+    diag.log("push", "error: " + e.message);
+    showBanner(e.message, "err");
+  }
+}
+
+// Tapping a notification opens its terminal. The service worker leaves
+// the target in a cache (the app may be reloading as it resumes) and
+// messages a running page.
+let openTarget = null;
+async function takeOpenTarget() {
+  try {
+    const c = await caches.open("notify-target");
+    const r = await c.match("open");
+    if (!r) return;
+    await c.delete("open");
+    const t = await r.json();
+    if (Date.now() - (t.at || 0) < 5 * 60 * 1000) { openTarget = t; applyOpenTarget(); }
+  } catch {}
+}
+function applyOpenTarget() {
+  const t = openTarget;
+  if (!t || !ui.tree.some((w) => w.id === t.ws && (w.surfaces || []).some((s) => s.id === t.sf))) return;
+  openTarget = null;
+  if (ui.sel?.ws !== t.ws || ui.sel?.sf !== t.sf) select(t.ws, t.sf);
+  if (prefs.bobView !== "chat") { prefs.bobView = "chat"; savePrefs(); applyPrefs(); }
+}
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (e) => { if (e.data?.t === "open") takeOpenTarget(); });
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) takeOpenTarget(); });
+
 // ---------- host switching ----------
 
 function switchHost(addr) {
@@ -1309,7 +1398,7 @@ function switchHost(addr) {
       renderScreen();
     },
     onFrame: (m) => {
-      if (m.t === "tree") onTree(m.workspaces);
+      if (m.t === "tree") { onTree(m.workspaces); applyOpenTarget(); }
       else if (m.t === "screen") onScreen(m);
       else if (m.t === "notice") onNotice(m);
       else if (m.t === "chat") onChat(m);
@@ -1371,3 +1460,4 @@ try {
   }
 } catch {}
 switchHost(currentAddr);
+takeOpenTarget();
