@@ -45,3 +45,36 @@ self.addEventListener("fetch", (e) => {
     }),
   );
 });
+
+// bob notifications, pushed by the Mac (internal/server/notify.go).
+self.addEventListener("push", (e) => {
+  let n = {};
+  try { n = e.data.json(); } catch { n = { title: e.data?.text() || "ray" }; }
+  e.waitUntil(self.registration.showNotification(n.title || "ray", {
+    body: n.body || "",
+    tag: n.tag || undefined,
+    data: { ws: n.ws, sf: n.sf },
+    icon: "icon-192.png",
+    badge: "icon-192.png",
+  }));
+});
+
+// Tapping one opens its terminal: leave the target where the page finds it
+// (even if it's reloading as it resumes), then bring the page up.
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const { ws, sf } = e.notification.data || {};
+  e.waitUntil((async () => {
+    if (ws && sf) {
+      const c = await caches.open("notify-target");
+      await c.put("open", new Response(JSON.stringify({ ws, sf, at: Date.now() })));
+    }
+    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    if (wins.length) {
+      await wins[0].focus().catch(() => {});
+      wins[0].postMessage({ t: "open" });
+    } else {
+      await self.clients.openWindow("./");
+    }
+  })());
+});
