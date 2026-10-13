@@ -59,22 +59,26 @@ self.addEventListener("push", (e) => {
   }));
 });
 
-// Tapping one opens its terminal: leave the target where the page finds it
-// (even if it's reloading as it resumes), then bring the page up.
+// Tapping one opens its terminal. The target travels three ways, since
+// any one can miss on iOS: in a cache the page checks as it comes up (it
+// may be reloading as it resumes), in a message to a running page, and in
+// the URL of a page we open.
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
   const { ws, sf } = e.notification.data || {};
   e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const target = { ws, sf, at: Date.now(), how: wins.length ? "focus" : "open" };
     if (ws && sf) {
       const c = await caches.open("notify-target");
-      await c.put("open", new Response(JSON.stringify({ ws, sf, at: Date.now() })));
+      await c.put("open", new Response(JSON.stringify(target)));
     }
-    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     if (wins.length) {
       await wins[0].focus().catch(() => {});
-      wins[0].postMessage({ t: "open" });
+      wins[0].postMessage({ t: "open", target });
     } else {
-      await self.clients.openWindow("./");
+      const q = ws && sf ? "?open=" + encodeURIComponent(ws) + "&sf=" + encodeURIComponent(sf) : "";
+      await self.clients.openWindow("./" + q);
     }
   })());
 });
