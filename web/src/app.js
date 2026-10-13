@@ -1344,31 +1344,61 @@ async function toggleNotifications() {
   }
 }
 
-// Tapping a notification opens its terminal. The service worker leaves
-// the target in a cache (the app may be reloading as it resumes) and
-// messages a running page.
+// Tapping a notification opens its terminal. The service worker passes
+// the target along every way it can (see sw.js): a cache entry, a message,
+// a ?open= URL. The page takes it from whichever arrives, then opens it
+// once the terminal shows up in the tree.
 let openTarget = null;
-async function takeOpenTarget() {
+function setOpenTarget(t, via) {
+  if (!t?.ws || !t?.sf) return;
+  if (t.at && Date.now() - t.at > 10 * 60 * 1000) return; // stale
+  diag.log("notif", `tap via ${via}${t.how ? "/" + t.how : ""}`);
+  openTarget = { ws: t.ws, sf: t.sf, since: Date.now() };
+  applyOpenTarget();
+}
+async function takeOpenTarget(via) {
   try {
     const c = await caches.open("notify-target");
     const r = await c.match("open");
     if (!r) return;
     await c.delete("open");
-    const t = await r.json();
-    if (Date.now() - (t.at || 0) < 5 * 60 * 1000) { openTarget = t; applyOpenTarget(); }
+    setOpenTarget(await r.json(), via);
   } catch {}
 }
 function applyOpenTarget() {
   const t = openTarget;
-  if (!t || !ui.tree.some((w) => w.id === t.ws && (w.surfaces || []).some((s) => s.id === t.sf))) return;
+  if (!t) return;
+  if (!ui.tree.some((w) => w.id === t.ws && (w.surfaces || []).some((s) => s.id === t.sf))) {
+    // Not in the tree (yet): it arrives once connected. Give up after a while.
+    if (Date.now() - t.since > 60 * 1000) { diag.log("notif", "terminal not found"); openTarget = null; }
+    return;
+  }
   openTarget = null;
-  if (ui.sel?.ws !== t.ws || ui.sel?.sf !== t.sf) select(t.ws, t.sf);
+  diag.log("notif", "opened");
   if (prefs.bobView !== "chat") { prefs.bobView = "chat"; savePrefs(); applyPrefs(); }
+  select(t.ws, t.sf); // also remembered, so it survives a reload
+}
+{
+  const q = new URLSearchParams(location.search);
+  if (q.get("open")) {
+    setOpenTarget({ ws: q.get("open"), sf: q.get("sf") }, "url");
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
 }
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.addEventListener("message", (e) => { if (e.data?.t === "open") takeOpenTarget(); });
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data?.t !== "open") return;
+    setOpenTarget(e.data.target, "message");
+    caches.open("notify-target").then((c) => c.delete("open")).catch(() => {});
+  });
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) takeOpenTarget(); });
+// The service worker may write the cache entry just after the page comes
+// up, so look again for a few seconds whenever it does.
+function watchOpenTarget(via) {
+  for (const ms of [0, 700, 1500, 3000, 6000]) setTimeout(() => takeOpenTarget(via), ms);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) watchOpenTarget("visible"); });
+window.addEventListener("focus", () => watchOpenTarget("focus"));
 
 // ---------- host switching ----------
 
@@ -1460,4 +1490,4 @@ try {
   }
 } catch {}
 switchHost(currentAddr);
-takeOpenTarget();
+watchOpenTarget("boot");
